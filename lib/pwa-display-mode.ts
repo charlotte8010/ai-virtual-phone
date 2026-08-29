@@ -26,7 +26,9 @@ export type PwaHostedOverlayMetrics = {
 
 export const PWA_DISPLAY_MODE_COOKIE = "pwa_display_mode";
 export const PWA_DISPLAY_MODE_CHANGED_EVENT = "pwa-display-mode-changed";
-export const DEFAULT_PWA_DISPLAY_PREFERENCE: PwaDisplayPreference = "standalone";
+export const DEFAULT_PWA_DISPLAY_PREFERENCE: PwaDisplayPreference = "fullscreen";
+
+let fullscreenRequestAttempted = false;
 
 function decodeCookieValue(value: string): string {
   try {
@@ -34,6 +36,21 @@ function decodeCookieValue(value: string): string {
   } catch {
     return value;
   }
+}
+
+function isInstalledAppSurface(): boolean {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return false;
+  const shellWindow = window as Window & { AndroidShell?: unknown };
+  if (typeof shellWindow.AndroidShell !== "undefined" || /FloatShell\//i.test(navigator.userAgent)) return true;
+  if (
+    window.matchMedia("(display-mode: fullscreen)").matches
+    || window.matchMedia("(display-mode: standalone)").matches
+    || window.matchMedia("(display-mode: minimal-ui)").matches
+  ) {
+    return true;
+  }
+  const navigatorWithStandalone = navigator as Navigator & { standalone?: boolean };
+  return navigatorWithStandalone.standalone === true;
 }
 
 export function readPwaDisplayPreference(cookie: string): PwaDisplayPreference | null {
@@ -46,20 +63,23 @@ export function readPwaDisplayPreference(cookie: string): PwaDisplayPreference |
 export function writePwaDisplayPreference(preference: PwaDisplayPreference) {
   if (typeof document === "undefined") return;
   document.cookie = `${PWA_DISPLAY_MODE_COOKIE}=${preference}; path=/; max-age=31536000; samesite=lax`;
+  // 用户手动重新选择全屏时，允许再尝试一次浏览器 Fullscreen API。
+  fullscreenRequestAttempted = false;
   window.dispatchEvent(new CustomEvent(PWA_DISPLAY_MODE_CHANGED_EVENT, { detail: preference }));
 }
 
 /**
- * Do not invoke the browser Fullscreen API unless the user explicitly opted in.
- * Chrome shows an unavoidable security toast whenever a page enters fullscreen;
- * installed PWA/Android shell already provide app-like chrome without needing it.
+ * 普通浏览器保留沉浸全屏，但每次页面生命周期最多请求一次，避免 Chrome 的
+ * 「退出全屏」安全提示在每次点击/切回页面时反复出现。安装后的 PWA 和 Android
+ * 壳由 manifest / 原生窗口负责沉浸，不调用 Fullscreen API，因此没有这条提示。
  */
 export function shouldRequestPwaFullscreen(): boolean {
   if (typeof document === "undefined" || typeof navigator === "undefined") return false;
-  const preference = readPwaDisplayPreference(document.cookie);
-  if (preference === "standalone") return false;
-  if (preference === "fullscreen") return true;
-  return false;
+  if (isInstalledAppSurface()) return false;
+  const preference = readPwaDisplayPreference(document.cookie) ?? DEFAULT_PWA_DISPLAY_PREFERENCE;
+  if (preference !== "fullscreen" || fullscreenRequestAttempted) return false;
+  fullscreenRequestAttempted = true;
+  return true;
 }
 
 export function getRuntimePwaDisplayMode(): RuntimePwaDisplayMode {
