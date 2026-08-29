@@ -2,9 +2,7 @@
 
 // 云服务统一部署（三合一）：备份桶 / 微信接入 / 离线推送在此一站配置。
 // 交互：中央黑色按钮直达 Supabase 令牌页 → 粘贴 Access Token 点确认 →
-// 弹窗选择 Supabase 组织与部署范围 → 自动创建专用项目并完成：
-// 取回项目地址与 service_role key（写入原云备份配置存储）、
-// 建桶、部署微信/推送云函数并自动执行定时任务 SQL。
+// 优先发现并接管账号里既有的 AI Phone Personal Cloud；找不到时才选择组织新建。
 // Token 与取回的 key 经站点代理透传，不存储不记录。
 
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
@@ -41,6 +39,13 @@ export function CloudServicesPage() {
 }
 
 type OrganizationOption = { id: string; slug: string; name: string };
+type PersonalCloudOption = {
+    projectRef: string;
+    name: string;
+    status: string;
+    organizationId: string;
+    functionSlugs: string[];
+};
 
 function smartRegionForCurrentTimeZone(): "americas" | "emea" | "apac" {
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
@@ -110,6 +115,42 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
         onConfigChanged?.();
     };
 
+    const connectExistingPersonalCloud = async (config: ReturnType<typeof loadCloudBackupConfig>, existing: PersonalCloudOption) => {
+        const keys = await callSupabaseAdmin<{ serviceRoleKey: string }>({
+            action: "api_keys",
+            token,
+            projectRef: existing.projectRef,
+        });
+        saveCloudBackupConfig({
+            ...config,
+            url: `https://${existing.projectRef}.supabase.co`,
+            key: keys.serviceRoleKey,
+            managedProjectRef: existing.projectRef,
+            managedOrganizationSlug: config.managedOrganizationSlug,
+        });
+        // 能从管理 API 明确看到微信函数时恢复本机的“已部署”显示；
+        // 离线推送的本机状态还需要设备订阅，因此不在这里伪造 ready 状态。
+        if (existing.functionSlugs.includes("weixin-assistant")) {
+            markWeixinCloudDeployed();
+            saveWeixinCloudScheduled(true);
+        }
+        setToken("");
+        setDialogOpen(false);
+        refreshStatus();
+        setResultDialog({
+            title: "已连接已有个人云",
+            text: `已接管现有项目 ${existing.projectRef}，没有创建新 Supabase 项目。现在可到「数据管理 → 云端恢复」把浏览器里的数据恢复到这个 APK。`,
+        });
+    };
+
+    const loadOrganizationsForNewProject = async () => {
+        const data = await callSupabaseAdmin<{ organizations: OrganizationOption[] }>({ action: "organizations", token });
+        if (data.organizations.length === 0) throw new Error("该 Supabase 账号下没有可用组织。");
+        setOrganizations(data.organizations);
+        setSelectedOrganizationSlug(data.organizations.length === 1 ? data.organizations[0].slug : "");
+        setSelectedRef("");
+    };
+
     const openScopeDialog = async () => {
         if (busy) return;
         setResultDialog(null);
@@ -120,7 +161,7 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
             const managedRef = config.managedProjectRef === configuredRef ? configuredRef : "";
             if (managedRef) {
                 // 本应用创建过的专用项目允许原地重新部署；旧版手填/误选项目没有标记，
-                // 一律走新建流程，绝不把这次发布写回已有业务库。
+                // 一律走发现/新建流程，绝不把这次发布写回已有业务库。
                 try {
                     const status = await callSupabaseAdmin<{ status: string }>({ action: "project_status", token, projectRef: managedRef });
                     if (status.status === "REMOVED") throw new Error("Resource has been removed");
@@ -130,7 +171,7 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                 } catch (err) {
                     if (!isRemovedManagedProjectError(err)) throw err;
                     // 用户可能在 Supabase Dashboard 手动删掉此前创建的个人云项目。
-                    // 只忘掉已经失效的云项目指向，保留自动备份间隔等本地设置，然后改走新建流程。
+                    // 只忘掉已经失效的云项目指向，保留自动备份间隔等本地设置。
                     saveCloudBackupConfig({
                         ...config,
                         url: "",
@@ -139,18 +180,34 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
                         managedOrganizationSlug: undefined,
                     });
                     setCloudReady(false);
-                    const data = await callSupabaseAdmin<{ organizations: OrganizationOption[] }>({ action: "organizations", token });
-                    if (data.organizations.length === 0) throw new Error("该 Supabase 账号下没有可用组织。");
-                    setOrganizations(data.organizations);
-                    setSelectedOrganizationSlug(data.organizations.length === 1 ? data.organizations[0].slug : "");
-                    setSelectedRef("");
+                    const discovered = await callSupabaseAdmin<{ projects: PersonalCloudOption[] }>({
+                        action: "discover_personal_clouds",
+                        token,
+                    });
+                    if (discovered.projects.length === 1) {
+                        await connectExistingPersonalCloud(config, discovered.projects[0]);
+                        return;
+                    }
+                    if (discovered.projects.length > 1) {
+                        throw new Error("发现多个 AI Phone Personal Cloud 项目。请先在 Supabase Dashboard 中保留你要使用的那一个，再回来连接。");
+                    }
+                    await loadOrganizationsForNewProject();
                 }
             } else {
-                const data = await callSupabaseAdmin<{ organizations: OrganizationOption[] }>({ action: "organizations", token });
-                if (data.organizations.length === 0) throw new Error("该 Supabase 账号下没有可用组织。");
-                setOrganizations(data.organizations);
-                setSelectedOrganizationSlug(data.organizations.length === 1 ? data.organizations[0].slug : "");
-                setSelectedRef("");
+                // 新 APK / 新浏览器没有本机云凭据时，先找账号里已经部署好的个人云。
+                // 这样换设备只需要一次 Token 身份确认，不会误建第二个项目。
+                const discovered = await callSupabaseAdmin<{ projects: PersonalCloudOption[] }>({
+                    action: "discover_personal_clouds",
+                    token,
+                });
+                if (discovered.projects.length === 1) {
+                    await connectExistingPersonalCloud(config, discovered.projects[0]);
+                    return;
+                }
+                if (discovered.projects.length > 1) {
+                    throw new Error("发现多个 AI Phone Personal Cloud 项目。请先在 Supabase Dashboard 中保留你要使用的那一个，再回来连接。");
+                }
+                await loadOrganizationsForNewProject();
             }
             setScopeBackup(true);
             setScopeWeixin(true);
