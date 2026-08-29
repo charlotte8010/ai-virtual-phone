@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { Viewport } from "next";
 
 import { AndroidFullscreen } from "@/components/android-fullscreen";
+import { WorldBuilderReturnMarker } from "@/components/internal-return-splash-guard";
 
 export const viewport: Viewport = {
   themeColor: "#121110",
@@ -86,6 +87,7 @@ body {
         }}
       />
       <AndroidFullscreen />
+      <WorldBuilderReturnMarker />
       {children}
     </>
   );
