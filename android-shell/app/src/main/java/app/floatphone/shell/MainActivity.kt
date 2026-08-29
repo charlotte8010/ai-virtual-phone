@@ -6,12 +6,15 @@ import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.view.View
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
 import android.webkit.JavascriptInterface
@@ -84,12 +87,41 @@ class MainActivity : AppCompatActivity() {
         else -> emptyList()
     }
 
+    /**
+     * Samsung / 国产 ROM 对隐藏 systemBars 的实现并不完全一致：
+     * WindowInsets 隐藏了图标后，仍可能给刘海区和手势区留黑色占位。
+     * 这里同时使用现代 Insets API + 传统 immersive sticky，并显式允许内容进入 cutout。
+     */
+    @Suppress("DEPRECATION")
     private fun enterImmersiveMode() {
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val attrs = window.attributes
+            attrs.layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+            window.attributes = attrs
+        }
+
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.systemBars())
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
+
+        // 旧式 flags 作为 OEM 兼容兜底，解决“图标没了但黑边还在”的情况。
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                or View.SYSTEM_UI_FLAG_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            )
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -101,7 +133,9 @@ class MainActivity : AppCompatActivity() {
         volumeControlStream = AudioManager.STREAM_MUSIC
 
         webView = WebView(this)
+        webView.setBackgroundColor(Color.BLACK)
         setContentView(webView)
+        enterImmersiveMode()
 
         webView.settings.apply {
             javaScriptEnabled = true
@@ -192,6 +226,11 @@ class MainActivity : AppCompatActivity() {
         // 冷启动带深链（如来电接听）直接加载目标；否则加载首页
         webView.loadUrl(consumeOpenUrl(intent) ?: SITE_URL)
         ensurePushService()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        enterImmersiveMode()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
