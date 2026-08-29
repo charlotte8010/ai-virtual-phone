@@ -3,9 +3,11 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
-// 签名：CI 里通过环境变量注入 keystore（见 android-shell/README.md）；
-// 没有配置时 release 构建产出未签名 APK，debug 构建始终可直接安装测试。
+// 签名：release 可通过仓库 Secrets 注入正式 keystore；
+// debug 在 CI 中使用仓库内固定的测试 keystore，这样每次 Actions 产物都能覆盖安装，
+// 不会因为 GitHub Runner 每次生成不同 debug key 而被迫卸载 App。
 def ksFile = System.getenv("SHELL_KEYSTORE_FILE")
+def debugKsFile = System.getenv("SHELL_DEBUG_KEYSTORE_FILE")
 def siteUrl = (System.getenv("SHELL_SITE_URL") ?: "https://example.invalid").replaceAll('/+$', '')
 
 android {
@@ -23,8 +25,16 @@ android {
 
     buildFeatures { buildConfig true }
 
-    if (ksFile) {
-        signingConfigs {
+    signingConfigs {
+        if (debugKsFile) {
+            ciDebug {
+                storeFile file(debugKsFile)
+                storePassword "android"
+                keyAlias "androiddebugkey"
+                keyPassword "android"
+            }
+        }
+        if (ksFile) {
             release {
                 storeFile file(ksFile)
                 storePassword System.getenv("SHELL_KEYSTORE_PASSWORD")
@@ -35,6 +45,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            if (debugKsFile) signingConfig signingConfigs.ciDebug
+        }
         release {
             minifyEnabled false
             if (ksFile) signingConfig signingConfigs.release
