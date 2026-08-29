@@ -2,23 +2,24 @@ package app.floatphone.shell
 
 import android.app.Activity
 import android.app.Application
-import android.graphics.Rect
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.view.MotionEvent
+import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
-import kotlin.math.abs
-import kotlin.math.roundToInt
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 /**
- * Float 的原生返回适配层。
+ * Float 的 Android 壳适配层。
  *
- * 沉浸式全屏下，Android 会优先占用左右边缘手势：第一次侧滑常被拿去临时显示
- * system bars，随后再次侧滑才触发系统 Back。为了让 Float 像普通 App 一样在页面内返回，
- * Android 10+ 把左右极窄边缘从系统手势区排除，并由 WebView 自己识别向内侧滑。
+ * 顶部保留系统状态栏，只隐藏底部导航栏。这样左右返回手势不会再先被沉浸式全屏
+ * 拿去“唤出系统栏”，第一次侧滑就能作为正常 Android Back 交给 Float 页面处理。
  */
 class FloatApplication : Application(), Application.ActivityLifecycleCallbacks {
 
@@ -33,9 +34,10 @@ class FloatApplication : Application(), Application.ActivityLifecycleCallbacks {
         val root = activity.findViewById<ViewGroup>(android.R.id.content)
         val webView = root?.getChildAt(0) as? WebView ?: return
 
-        installEdgeBackGesture(activity, webView)
+        // MainActivity 旧逻辑仍会尝试进入 immersive；这里在创建完成后覆盖成
+        // “顶部状态栏常驻 + 底部导航栏隐藏”，并在窗口重新获得焦点后再次校正。
+        installSystemBarPolicy(activity)
 
-        // 物理返回键 / 三键导航 / 未被排除区域产生的系统 Back 也走同一套 Float 返回逻辑。
         activity.onBackPressedDispatcher.addCallback(activity, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 performFloatBack(activity, webView)
@@ -43,71 +45,43 @@ class FloatApplication : Application(), Application.ActivityLifecycleCallbacks {
         })
     }
 
-    private fun installEdgeBackGesture(activity: MainActivity, webView: WebView) {
-        val density = resources.displayMetrics.density
-        // 只占最边缘，尽量不影响页面左上角返回按钮等正常点击。
-        val edgeWidthPx = (24f * density).roundToInt()
-        val triggerDistancePx = (64f * density).roundToInt()
+    private fun installSystemBarPolicy(activity: MainActivity) {
+        fun applyPolicy() {
+            val window = activity.window
+            window.statusBarColor = Color.BLACK
+            window.navigationBarColor = Color.TRANSPARENT
 
-        fun updateGestureExclusion() {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
-            if (webView.width <= 0 || webView.height <= 0) return
-            webView.systemGestureExclusionRects = listOf(
-                Rect(0, 0, edgeWidthPx, webView.height),
-                Rect(webView.width - edgeWidthPx, 0, webView.width, webView.height),
-            )
-        }
-
-        webView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            updateGestureExclusion()
-        }
-        webView.post { updateGestureExclusion() }
-
-        var tracking = false
-        var fromLeft = false
-        var downX = 0f
-        var downY = 0f
-
-        webView.setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    val startsLeft = event.x <= edgeWidthPx
-                    val startsRight = event.x >= webView.width - edgeWidthPx
-                    tracking = startsLeft || startsRight
-                    fromLeft = startsLeft
-                    if (tracking) {
-                        downX = event.x
-                        downY = event.y
-                    }
-                    tracking
-                }
-
-                MotionEvent.ACTION_MOVE -> tracking
-
-                MotionEvent.ACTION_UP -> {
-                    if (!tracking) {
-                        false
-                    } else {
-                        val dx = event.x - downX
-                        val dy = event.y - downY
-                        val horizontalEnough = abs(dx) >= triggerDistancePx && abs(dx) > abs(dy) * 1.2f
-                        val correctDirection = if (fromLeft) dx > 0 else dx < 0
-                        tracking = false
-                        if (horizontalEnough && correctDirection) {
-                            performFloatBack(activity, webView)
-                        }
-                        true
-                    }
-                }
-
-                MotionEvent.ACTION_CANCEL -> {
-                    val wasTracking = tracking
-                    tracking = false
-                    wasTracking
-                }
-
-                else -> tracking
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val attrs = window.attributes
+                attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+                window.attributes = attrs
             }
+
+            // 页面从系统状态栏下方开始布局，不再延伸进刘海/状态栏区域。
+            WindowCompat.setDecorFitsSystemWindows(window, true)
+            WindowCompat.getInsetsController(window, window.decorView).apply {
+                show(WindowInsetsCompat.Type.statusBars())
+                hide(WindowInsetsCompat.Type.navigationBars())
+                isAppearanceLightStatusBars = false
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+
+            // 清掉 MainActivity immersive 中的 FULLSCREEN/LAYOUT_FULLSCREEN，只保留底栏隐藏。
+            @Suppress("DEPRECATION")
+            run {
+                window.decorView.systemUiVisibility = (
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                        View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    )
+            }
+        }
+
+        applyPolicy()
+        activity.window.decorView.post { applyPolicy() }
+
+        // MainActivity.onWindowFocusChanged() 会再次调用旧 immersive；延后一拍覆盖回来。
+        activity.window.decorView.viewTreeObserver.addOnWindowFocusChangeListener { hasFocus ->
+            if (hasFocus) activity.window.decorView.post { applyPolicy() }
         }
     }
 
@@ -115,8 +89,13 @@ class FloatApplication : Application(), Application.ActivityLifecycleCallbacks {
         val script = """
             (function () {
               try {
+                var selectors = [
+                  '.page-back-btn',
+                  'button[aria-label="返回"]',
+                  '[role="button"][aria-label="返回"]'
+                ];
                 var buttons = Array.prototype.slice.call(
-                  document.querySelectorAll('button.page-back-btn[aria-label="返回"]')
+                  document.querySelectorAll(selectors.join(','))
                 );
                 for (var i = buttons.length - 1; i >= 0; i--) {
                   var button = buttons[i];
@@ -149,7 +128,16 @@ class FloatApplication : Application(), Application.ActivityLifecycleCallbacks {
     }
 
     override fun onActivityStarted(activity: Activity) = Unit
-    override fun onActivityResumed(activity: Activity) = Unit
+
+    override fun onActivityResumed(activity: Activity) {
+        if (activity is MainActivity) {
+            activity.window.decorView.post {
+                // 触发已安装的窗口焦点策略；这里额外 requestApplyInsets 让状态栏占位立即生效。
+                activity.window.decorView.requestApplyInsets()
+            }
+        }
+    }
+
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
