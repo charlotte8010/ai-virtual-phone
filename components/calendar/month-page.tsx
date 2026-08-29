@@ -182,7 +182,7 @@ export function CalendarMonthPage({
       {/* 顶部玻璃悬浮层：周几及以上区域，日历内容从下方透出 */}
       <div className="calendar-month-header" ref={headerRef}>
         <div className="calendar-apple-topbar">
-          <button type="button" className="calendar-pill-btn calendar-back-btn" onClick={onClose} aria-label="返回桌面">
+          <button data-float-back="true" type="button" className="calendar-pill-btn calendar-back-btn" onClick={onClose} aria-label="返回桌面">
             <ChevronLeft size={19} />
             {titleYear}年
           </button>

@@ -21,7 +21,7 @@ export function PageShell({ title = "", onBack, leftAction, rightAction, childre
         <div className="page-header-safe-area" />
         <div className="page-header-content">
           {onBack ? (
-            <button className="page-back-btn" type="button" onClick={onBack} aria-label="返回">
+            <button data-float-back="true" className="page-back-btn" type="button" onClick={onBack} aria-label="返回">
               <ChevronLeft size={24} strokeWidth={1.5} />
             </button>
           ) : leftAction ? (
@@ -58,7 +58,7 @@ export function PageOverlayHeader({ title, onBack, rightAction, className }: Pag
     <header className={`page-header pointer-events-none absolute top-0 left-0 right-0 z-10 ${className ?? ""}`}>
       <div className="page-header-safe-area" />
       <div className="page-header-content">
-        <button className="page-back-btn pointer-events-auto" type="button" onClick={onBack} aria-label="返回">
+        <button data-float-back="true" className="page-back-btn pointer-events-auto" type="button" onClick={onBack} aria-label="返回">
           <ChevronLeft size={24} strokeWidth={1.5} />
         </button>
         <span className="page-title">{title}</span>

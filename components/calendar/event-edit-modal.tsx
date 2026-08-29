@@ -52,7 +52,7 @@ export function CalendarEventEditModal({
     <div className="modal-overlay calendar-edit-modal-overlay" onClick={onClose}>
       <div className="calendar-edit-modal" data-ui="calendar-edit-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header" data-ui="modal-header">
-          <button onClick={onClose} className="modal-header-btn modal-header-btn-muted" aria-label="返回">
+          <button data-float-back="true" onClick={onClose} className="modal-header-btn modal-header-btn-muted" aria-label="返回">
             <ChevronLeft size={18} />
           </button>
           <span className="modal-header-title">{draft.id ? "编辑日程" : "新增日程"}</span>

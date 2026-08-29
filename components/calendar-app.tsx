@@ -727,7 +727,7 @@ export function PhoneCalendarApp({
         <div className="modal-overlay calendar-edit-modal-overlay" onClick={() => setShowMenstrualSettings(false)}>
           <div className="calendar-edit-modal calendar-menstrual-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header" data-ui="modal-header">
-              <button onClick={() => setShowMenstrualSettings(false)} className="modal-header-btn modal-header-btn-muted" aria-label="返回">
+              <button data-float-back="true" onClick={() => setShowMenstrualSettings(false)} className="modal-header-btn modal-header-btn-muted" aria-label="返回">
                 <ChevronLeft size={18} />
               </button>
               <span className="modal-header-title">周期设置</span>

@@ -318,7 +318,7 @@ export function CalendarDetailPage({
   return (
     <div className="calendar-page calendar-page-detail">
       <div className="calendar-apple-topbar">
-        <button type="button" className="calendar-pill-btn calendar-back-btn" onClick={onBack}>
+        <button data-float-back="true" type="button" className="calendar-pill-btn calendar-back-btn" onClick={onBack}>
           <span aria-hidden="true">‹</span> {backLabel}
         </button>
         <span className="calendar-topbar-space" />

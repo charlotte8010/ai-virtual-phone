@@ -852,7 +852,7 @@ function HomeScreen({
   return (
     <>
       <header className="interview-header">
-        <button className="interview-icon-btn" onClick={onClose} aria-label="返回桌面">
+        <button data-float-back="true" className="interview-icon-btn" onClick={onClose} aria-label="返回桌面">
           <ChevronLeft size={20} />
         </button>
         <SmallCaps className="text-white/70 tracking-widest">The Interview</SmallCaps>
@@ -1081,7 +1081,7 @@ function SetupScreen({
   return (
     <>
       <header className="interview-header">
-        <button className="interview-icon-btn" onClick={onBack}>
+        <button data-float-back="true" className="interview-icon-btn" onClick={onBack}>
           <ChevronLeft size={20} />
         </button>
         <div className="text-center">
@@ -1439,7 +1439,7 @@ function GeneratingScreen({ onBack }: { onBack: () => void }) {
         <SmallCaps className="text-white/40 mb-2">COMPOSING ISSUE</SmallCaps>
         <div className="font-display text-2xl text-white font-bold tracking-widest mb-2">IN PRESS</div>
         <p className="text-white/50 text-sm">正在整理实录与排版，请稍候...</p>
-        <button className="mt-8 text-white/30 text-xs font-mono hover:text-white/60 transition-colors" onClick={onBack}>
+        <button data-float-back="true" className="mt-8 text-white/30 text-xs font-mono hover:text-white/60 transition-colors" onClick={onBack}>
           [ CANCEL // 取消 ]
         </button>
       </div>
@@ -1460,7 +1460,7 @@ function ArticleScreen({
   return (
     <div className="absolute inset-0 bg-[#0a0a0a] z-40 overflow-hidden flex flex-col">
       <header className="interview-header bg-black/50 backdrop-blur-md absolute top-0 left-0 right-0 z-10">
-        <button className="w-10 h-10 flex items-center justify-center text-white/60 hover:text-white transition-colors" onClick={onBack}>
+        <button data-float-back="true" className="w-10 h-10 flex items-center justify-center text-white/60 hover:text-white transition-colors" onClick={onBack}>
           <ChevronLeft size={22} />
         </button>
         <SmallCaps className="text-white/40 tracking-widest">ISSUE NO.{String(issue.issueNumber).padStart(2, "0")}</SmallCaps>
