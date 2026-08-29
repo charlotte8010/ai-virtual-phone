@@ -1,4 +1,4 @@
-name: Audit app back navigation
+name: Audit custom app and plugin runtime
 
 on:
   push:
@@ -10,12 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Scan navigation implementations
+      - name: Scan custom app and plugin runtime
         shell: bash
         run: |
-          echo '=== files containing user-facing back semantics ==='
-          grep -RIlE 'aria-label=["'"'"'][^"'"'"']*(返回|Back)|title=["'"'"'][^"'"'"']*(返回|Back)|page-back-btn|calendar-back-btn|ChevronLeft|ArrowLeft|CaretLeft|onBack|onClose' app components lib --include='*.ts' --include='*.tsx' 2>/dev/null | sort
-          echo '=== relevant lines ==='
-          grep -RInE 'aria-label=["'"'"'][^"'"'"']*(返回|Back)|title=["'"'"'][^"'"'"']*(返回|Back)|page-back-btn|calendar-back-btn|ChevronLeft|ArrowLeft|CaretLeft|onBack|onClose|set(View|Page|Screen|Mode)\(' app components lib --include='*.ts' --include='*.tsx' 2>/dev/null | head -n 1200
-          echo '=== labels: presence/calendar ==='
-          grep -RInE '在场|日历|Calendar|presence|Presence' app components lib --include='*.ts' --include='*.tsx' 2>/dev/null | head -n 500
+          echo '=== custom app runner/navigation ==='
+          grep -RInE 'custom-app-runner|srcDoc|iframe|safe-area|window\.open|location\.(href|assign|replace)|target=["'"'"']_blank|openExternal|onClose' app components lib styles --include='*.ts' --include='*.tsx' --include='*.css' 2>/dev/null | head -n 1600
+          echo '=== plugin runtime/cleanup ==='
+          grep -RInE 'chat-plugin|stopPlugin|disposable|injectCSS|openModal|appendChild|document\.body|document\.head|createElement|enabled' app components lib --include='*.ts' --include='*.tsx' 2>/dev/null | head -n 1800
+          echo '=== share repo: exact dynamic background phrase ==='
+          git clone --depth=1 https://github.com/xiaolongbao0709/ai-virtual-phone-share.git /tmp/share >/dev/null 2>&1
+          grep -RInF '关闭动态背景' /tmp/share/资源 2>/dev/null | head -n 200 || true
+          echo '=== share repo: dynamic/background JS candidates ==='
+          find /tmp/share/资源 -type f \( -name '*.js' -o -name '*.txt' -o -name '*.json' \) -print0 | xargs -0 grep -IlE '动态背景|关闭背景|背景动画|animated.?background|background.*(canvas|video)|canvas.*background' 2>/dev/null | head -n 200 || true
+          echo '=== share repo: 筑境 ==='
+          grep -RInF '筑境' /tmp/share/资源 2>/dev/null | head -n 200 || true
