@@ -16,6 +16,7 @@
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <application
+        android:name=".FloatApplication"
         android:label="@string/app_name"
         android:icon="@drawable/appicon"
         android:allowBackup="true"
