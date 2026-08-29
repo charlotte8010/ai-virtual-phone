@@ -1,0 +1,201 @@
+from pathlib import Path
+
+main_path = Path("android-shell/app/src/main/java/app/floatphone/shell/MainActivity.kt")
+main = main_path.read_text()
+
+old = """        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {"""
+new = """        webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                syncPushConfigFromWebView()
+            }
+
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {"""
+assert old in main, "MainActivity WebViewClient anchor missing"
+main = main.replace(old, new, 1)
+
+anchor = """    private fun ensurePushService() {
+"""
+insert = r'''    /**
+     * 把网页 IndexedDB 中已经绑定的个人 Supabase 配置同步给原生后台推送。
+     * 页面侧配置可能在首次恢复/重新绑定后才出现，所以注入一个轻量定时同步；
+     * 原生端会比较配置，完全相同时不会反复重连。
+     */
+    private fun syncPushConfigFromWebView() {
+        val script = """
+            (function () {
+              if (window.__floatShellPushSyncInstalled) return;
+              window.__floatShellPushSyncInstalled = true;
+              function syncFloatPush() {
+                try {
+                  var req = indexedDB.open('AiPhoneKvDB');
+                  req.onsuccess = function () {
+                    try {
+                      var db = req.result;
+                      var tx = db.transaction('entries', 'readonly');
+                      var getReq = tx.objectStore('entries').get('ai_phone_cloud_backup_config_v1');
+                      getReq.onsuccess = function () {
+                        try {
+                          var row = getReq.result;
+                          var raw = row && row.value;
+                          if (!raw) return;
+                          var cfg = JSON.parse(raw);
+                          if (cfg && cfg.url && cfg.key && window.AndroidShell && window.AndroidShell.configurePush) {
+                            window.AndroidShell.configurePush(String(cfg.url), String(cfg.key), 'owner');
+                          }
+                        } catch (_) {}
+                      };
+                    } catch (_) {}
+                  };
+                } catch (_) {}
+              }
+              syncFloatPush();
+              window.setInterval(syncFloatPush, 5000);
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(script, null)
+    }
+
+'''
+assert anchor in main, "MainActivity ensurePushService anchor missing"
+main = main.replace(anchor, insert + anchor, 1)
+
+old = """        /** 请求忽略电池优化（保活关键一步）。 */
+        @SuppressLint("BatteryLife")
+        @JavascriptInterface
+        fun requestIgnoreBatteryOptimization() {"""
+new = """        /** 网页把个人云配置交给原生长连接；配置仅保存在本 App 私有目录。 */
+        @JavascriptInterface
+        fun configurePush(supabaseUrl: String, apiKey: String, userId: String) {
+            PushService.configure(this@MainActivity, supabaseUrl, apiKey, userId)
+        }
+
+        /** 请求忽略电池优化（保活关键一步）。 */
+        @SuppressLint("BatteryLife")
+        @JavascriptInterface
+        fun requestIgnoreBatteryOptimization() {"""
+assert old in main, "MainActivity ShellBridge anchor missing"
+main = main.replace(old, new, 1)
+main_path.write_text(main)
+
+push_path = Path("android-shell/app/src/main/java/app/floatphone/shell/PushService.kt")
+push = push_path.read_text()
+
+old = """        private const val NOTIF_FG_ID = 1
+        private var running = false
+
+        fun start(context: Context) {
+            if (running) return
+            val intent = Intent(context, PushService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+            else context.startService(intent)
+        }
+"""
+new = """        private const val NOTIF_FG_ID = 1
+        private const val PREFS = "float_shell_push"
+        private const val PREF_URL = "supabase_url"
+        private const val PREF_KEY = "api_key"
+        private const val PREF_USER = "user_id"
+        private const val ACTION_RECONFIGURE = "app.floatphone.shell.RECONFIGURE_PUSH"
+        private var running = false
+
+        fun start(context: Context) {
+            if (running) return
+            val intent = Intent(context, PushService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+            else context.startService(intent)
+        }
+
+        fun configure(context: Context, supabaseUrl: String, apiKey: String, userId: String) {
+            val url = supabaseUrl.trim().trimEnd('/')
+            val key = apiKey.trim()
+            val user = userId.trim().ifEmpty { "owner" }
+            if (!url.startsWith("https://") || key.isEmpty()) return
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val unchanged = prefs.getString(PREF_URL, "") == url &&
+                prefs.getString(PREF_KEY, "") == key &&
+                prefs.getString(PREF_USER, "") == user
+            if (unchanged) {
+                start(context)
+                return
+            }
+            prefs.edit().putString(PREF_URL, url).putString(PREF_KEY, key).putString(PREF_USER, user).apply()
+            val intent = Intent(context, PushService::class.java).setAction(ACTION_RECONFIGURE)
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+            else context.startService(intent)
+        }
+"""
+assert old in push, "PushService companion anchor missing"
+push = push.replace(old, new, 1)
+
+old = "    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY\n"
+new = """    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_RECONFIGURE) {
+            shellSubRegistered = false
+            socket?.cancel()
+        }
+        return START_STICKY
+    }
+"""
+assert old in push, "PushService onStartCommand anchor missing"
+push = push.replace(old, new, 1)
+
+old = """    /** 借 WebView 的登录 Cookie 调站点接口获取连接参数。 */
+    private fun fetchConfig(): PushConfig? = runCatching {
+        val cookie = CookieManager.getInstance().getCookie(MainActivity.SITE_URL) ?: return null
+"""
+new = """    /**
+     * 优先使用 APK 从网页个人云配置同步过来的参数。这样不依赖站点账号登录，
+     * 也不会再卡在 /api/auth/me；旧站点 Cookie 方案仅保留作向后兼容兜底。
+     */
+    private fun fetchConfig(): PushConfig? = runCatching {
+        loadPersonalConfig()?.let { config ->
+            registerPersonalShellSubscription(config)
+            return config
+        }
+        val cookie = CookieManager.getInstance().getCookie(MainActivity.SITE_URL) ?: return null
+"""
+assert old in push, "PushService fetchConfig anchor missing"
+push = push.replace(old, new, 1)
+
+anchor = """    /**
+     * 在站点注册一条合成推送订阅（endpoint = shell:<userId>）。
+"""
+insert = '''    private fun loadPersonalConfig(): PushConfig? {
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val url = prefs.getString(PREF_URL, "").orEmpty().trim().trimEnd('/')
+        val key = prefs.getString(PREF_KEY, "").orEmpty().trim()
+        val userId = prefs.getString(PREF_USER, "owner").orEmpty().trim().ifEmpty { "owner" }
+        if (!url.startsWith("https://") || key.isEmpty()) return null
+        return PushConfig(url, key, userId)
+    }
+
+    /** 直接在个人 Supabase 网关注册 Android 壳订阅。 */
+    private fun registerPersonalShellSubscription(config: PushConfig) {
+        if (shellSubRegistered) return
+        runCatching {
+            val body = JSONObject()
+                .put("endpoint", "shell:${config.userId}")
+                .put("keys", JSONObject().put("p256dh", "shell").put("auth", "shell"))
+                .toString()
+                .toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("${config.supabaseUrl}/functions/v1/ai-phone-push?action=subscribe")
+                .header("x-ai-phone-service-key", config.anonKey)
+                .header("x-ai-phone-origin", MainActivity.SITE_URL)
+                .post(body)
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) shellSubRegistered = true
+            }
+        }
+    }
+
+'''
+assert anchor in push, "PushService register anchor missing"
+push = push.replace(anchor, insert + anchor, 1)
+
+push = push.replace('val title = body.optString("title").ifEmpty { "小手机" }', 'val title = body.optString("title").ifEmpty { "Float" }')
+push = push.replace('.setContentTitle("小手机")', '.setContentTitle("Float")')
+push_path.write_text(push)
