@@ -1,0 +1,21 @@
+name: Audit app back navigation
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/audit-back.yml"]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan navigation implementations
+        shell: bash
+        run: |
+          echo '=== files containing user-facing back semantics ==='
+          grep -RIlE 'aria-label=["'"'"'][^"'"'"']*(返回|Back)|title=["'"'"'][^"'"'"']*(返回|Back)|page-back-btn|calendar-back-btn|ChevronLeft|ArrowLeft|CaretLeft|onBack|onClose' app components lib --include='*.ts' --include='*.tsx' 2>/dev/null | sort
+          echo '=== relevant lines ==='
+          grep -RInE 'aria-label=["'"'"'][^"'"'"']*(返回|Back)|title=["'"'"'][^"'"'"']*(返回|Back)|page-back-btn|calendar-back-btn|ChevronLeft|ArrowLeft|CaretLeft|onBack|onClose|set(View|Page|Screen|Mode)\(' app components lib --include='*.ts' --include='*.tsx' 2>/dev/null | head -n 1200
+          echo '=== labels: presence/calendar ==='
+          grep -RInE '在场|日历|Calendar|presence|Presence' app components lib --include='*.ts' --include='*.tsx' 2>/dev/null | head -n 500
