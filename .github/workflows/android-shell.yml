@@ -61,3 +61,5 @@ jobs:
         with:
           name: float-shell-release
           path: android-shell/app/build/outputs/apk/release/*.apk
+
+# status-bar reconciliation build trigger
