@@ -74,6 +74,11 @@ async function callSupabaseAdmin<T>(payload: Record<string, unknown>): Promise<T
     return data;
 }
 
+function isRemovedManagedProjectError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /resource has been removed|project(?: has been)? (?:removed|deleted)|project not found/i.test(message);
+}
+
 export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () => void }) {
     const [cloudReady, setCloudReady] = useState(false);
     const [pushActive, setPushActive] = useState(false);
@@ -116,9 +121,30 @@ export function CloudServicesSetup({ onConfigChanged }: { onConfigChanged?: () =
             if (managedRef) {
                 // 本应用创建过的专用项目允许原地重新部署；旧版手填/误选项目没有标记，
                 // 一律走新建流程，绝不把这次发布写回已有业务库。
-                setSelectedRef(managedRef);
-                setOrganizations([]);
-                setSelectedOrganizationSlug(config.managedOrganizationSlug || "");
+                try {
+                    const status = await callSupabaseAdmin<{ status: string }>({ action: "project_status", token, projectRef: managedRef });
+                    if (status.status === "REMOVED") throw new Error("Resource has been removed");
+                    setSelectedRef(managedRef);
+                    setOrganizations([]);
+                    setSelectedOrganizationSlug(config.managedOrganizationSlug || "");
+                } catch (err) {
+                    if (!isRemovedManagedProjectError(err)) throw err;
+                    // 用户可能在 Supabase Dashboard 手动删掉此前创建的个人云项目。
+                    // 只忘掉已经失效的云项目指向，保留自动备份间隔等本地设置，然后改走新建流程。
+                    saveCloudBackupConfig({
+                        ...config,
+                        url: "",
+                        key: "",
+                        managedProjectRef: undefined,
+                        managedOrganizationSlug: undefined,
+                    });
+                    setCloudReady(false);
+                    const data = await callSupabaseAdmin<{ organizations: OrganizationOption[] }>({ action: "organizations", token });
+                    if (data.organizations.length === 0) throw new Error("该 Supabase 账号下没有可用组织。");
+                    setOrganizations(data.organizations);
+                    setSelectedOrganizationSlug(data.organizations.length === 1 ? data.organizations[0].slug : "");
+                    setSelectedRef("");
+                }
             } else {
                 const data = await callSupabaseAdmin<{ organizations: OrganizationOption[] }>({ action: "organizations", token });
                 if (data.organizations.length === 0) throw new Error("该 Supabase 账号下没有可用组织。");
