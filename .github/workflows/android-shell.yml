@@ -9,7 +9,7 @@ on:
         type: string
   push:
     branches: [main]
-    paths: ["android-shell/**", ".github/workflows/android-shell.yml"]
+    paths: ["android-shell/**", ".github/workflows/android-shell.yml", "public/icon-512.png"]
 
 jobs:
   build:
@@ -32,6 +32,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: "8.7"
+
+      - name: Sync web icon to Android
+        run: cp public/icon-512.png android-shell/app/src/main/res/drawable/appicon.png
 
       - name: Decode stable debug keystore
         run: |
