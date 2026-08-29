@@ -1,0 +1,75 @@
+name: Apply MainActivity status/back fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/fix_mainactivity_system_bars_back.py"
+      - ".github/workflows/apply_mainactivity_system_bars_back.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-build:
+    runs-on: ubuntu-latest
+    env:
+      SHELL_KEYSTORE_BASE64: ${{ secrets.SHELL_KEYSTORE_BASE64 }}
+      SHELL_KEYSTORE_PASSWORD: ${{ secrets.SHELL_KEYSTORE_PASSWORD }}
+      SHELL_KEY_ALIAS: ${{ secrets.SHELL_KEY_ALIAS }}
+      SHELL_KEY_PASSWORD: ${{ secrets.SHELL_KEY_PASSWORD }}
+      SHELL_SITE_URL: ${{ vars.SHELL_SITE_URL || 'https://ai-virtual-phone-ten-sigma.vercel.app' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply root fix
+        run: |
+          python .github/scripts/fix_mainactivity_system_bars_back.py
+          rm .github/scripts/fix_mainactivity_system_bars_back.py
+          rm .github/workflows/apply_mainactivity_system_bars_back.yml
+
+      - name: Commit root fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix Android status bar and Float back navigation"
+          git push
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.7"
+
+      - name: Sync web icon to Android
+        run: cp public/icon-512.png android-shell/app/src/main/res/drawable/appicon.png
+
+      - name: Decode stable debug keystore
+        run: |
+          base64 -d android-shell/ci-debug.keystore.b64 > /tmp/float-ci-debug.keystore
+          echo "SHELL_DEBUG_KEYSTORE_FILE=/tmp/float-ci-debug.keystore" >> "$GITHUB_ENV"
+
+      - name: Decode release keystore (optional)
+        if: ${{ env.SHELL_KEYSTORE_BASE64 != '' }}
+        run: |
+          echo "$SHELL_KEYSTORE_BASE64" | base64 -d > /tmp/shell.keystore
+          echo "SHELL_KEYSTORE_FILE=/tmp/shell.keystore" >> "$GITHUB_ENV"
+
+      - name: Build APKs
+        run: gradle -p android-shell assembleDebug assembleRelease
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: float-shell-debug-statusbar-fix
+          path: android-shell/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: float-shell-release-statusbar-fix
+          path: android-shell/app/build/outputs/apk/release/*.apk
