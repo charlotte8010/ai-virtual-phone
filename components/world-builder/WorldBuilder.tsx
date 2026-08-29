@@ -67,15 +67,20 @@ export default function WorldBuilder() {
     });
   }, []);
 
-  const handleInitialBootBack = useCallback(() => {
+  const handleBackToPhone = useCallback(() => {
     if (window.opener && !window.opener.closed) {
       window.opener.focus();
+      window.close();
+      window.setTimeout(() => {
+        if (!window.closed) window.location.replace("/");
+      }, 40);
+      return;
     }
-    window.close();
-    window.setTimeout(() => {
-      if (!window.closed) window.location.replace("/");
-    }, 40);
+    // Android WebView / same-tab fallback: 筑境在当前 Float 页面里打开，不能靠 window.close() 返回。
+    window.location.replace("/");
   }, []);
+
+  const handleInitialBootBack = handleBackToPhone;
 
   // 所有分类（预设 + 用户）
   const allCategories = [
@@ -198,7 +203,13 @@ export default function WorldBuilder() {
   return (
     <div className={`wb-layout ${isLightTheme(settings.theme) ? "wb-light" : ""} ${showInitialBoot ? "wb-layout--booting" : ""}`}>
       <div className="wb-topbar">
-          <button className="wb-topbar-btn" onClick={() => window.close()}>
+          <button
+            className="wb-topbar-btn wb-topbar-back"
+            type="button"
+            data-float-back="world-builder"
+            aria-label="返回小手机"
+            onClick={handleBackToPhone}
+          >
             返回
           </button>
           <button className="wb-topbar-btn" onClick={handleUndo} disabled={history.current.length === 0}>
@@ -271,7 +282,12 @@ export default function WorldBuilder() {
               <h1>正在搭建筑境</h1>
               <p>场景出现后会自动进入。</p>
             </div>
-            <button className="wb-initial-back" type="button" onClick={handleInitialBootBack}>
+            <button
+              className="wb-initial-back"
+              type="button"
+              data-float-back="world-builder"
+              onClick={handleInitialBootBack}
+            >
               返回小手机
             </button>
           </div>
