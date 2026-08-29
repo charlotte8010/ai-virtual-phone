@@ -82,6 +82,7 @@ class PushService : Service() {
     private var msgSeq = 2
     private var notifId = 100
     private var shellSubRegistered = false
+    private val reconnectSignal = Object()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -97,6 +98,8 @@ class PushService : Service() {
         if (intent?.action == ACTION_RECONFIGURE) {
             shellSubRegistered = false
             socket?.cancel()
+            updateKeepAlive("正在连接个人云…")
+            synchronized(reconnectSignal) { reconnectSignal.notifyAll() }
         }
         return START_STICKY
     }
@@ -114,14 +117,14 @@ class PushService : Service() {
         while (!stopped) {
             val config = fetchConfig()
             if (config == null) {
-                updateKeepAlive("未登录或站点不可达，稍后重试")
-                sleepSec(60); continue
+                updateKeepAlive("等待个人云配置…")
+                waitForReconnect(5); continue
             }
             updateKeepAlive("已连接，等待角色消息")
             val closedNormally = runSocket(config)
             if (stopped) break
             updateKeepAlive("连接断开，重连中…")
-            sleepSec(if (closedNormally) 3 else backoffSec)
+            waitForReconnect(if (closedNormally) 3 else backoffSec)
             backoffSec = (backoffSec * 2).coerceAtMost(120)
             if (closedNormally) backoffSec = 5
         }
@@ -425,6 +428,12 @@ class PushService : Service() {
             .build()
         getSystemService(NotificationManager::class.java).notify(notifId++, notification)
         if (notifId > 400) notifId = 100
+    }
+
+    private fun waitForReconnect(sec: Long) {
+        synchronized(reconnectSignal) {
+            runCatching { reconnectSignal.wait(sec * 1000) }
+        }
     }
 
     private fun sleepSec(sec: Long) {
