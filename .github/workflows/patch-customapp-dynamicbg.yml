@@ -1,0 +1,39 @@
+name: Patch custom app and dynamic background
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/patch-customapp-dynamicbg.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply compatibility patch
+        run: python .github/scripts/patch_customapp_dynamicbg.py
+      - name: Verify key changes
+        shell: bash
+        run: |
+          grep -q '!request.isForMainFrame' android-shell/app/src/main/java/app/floatphone/shell/MainActivity.kt
+          grep -q 'data-float-back="true" type="button" className="cap-btn"' components/app-market/custom-app-runner.tsx
+          grep -q '关闭动态背景' components/chat-plugin-bootstrap.tsx
+          grep -q 'FloatShell\\/' lib/pwa-display-mode.ts
+      - name: Remove temporary audit and patch files
+        shell: bash
+        run: |
+          rm -f AUDIT_RUNTIME.txt
+          rm -f .github/workflows/audit-back.yml
+          rm -f .github/scripts/patch_customapp_dynamicbg.py
+          rm -f .github/workflows/patch-customapp-dynamicbg.yml
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix custom app Android compatibility and dynamic background cleanup'
+          git push
