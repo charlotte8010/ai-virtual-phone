@@ -73,6 +73,67 @@ async function handleOrganizations(token: string): Promise<NextResponse> {
   return NextResponse.json({ ok: true, organizations });
 }
 
+async function hasPersonalCloudMarker(token: string, projectRef: string): Promise<boolean> {
+  const response = await managementFetch(token, `/projects/${projectRef}/database/query`, {
+    method: "POST",
+    body: JSON.stringify({
+      query: "select to_regclass('public.ai_phone_cloud_meta') is not null as is_personal_cloud",
+      read_only: true,
+    }),
+  });
+  if (!response.ok) return false;
+  const rows = await response.json().catch(() => null) as Array<{ is_personal_cloud?: unknown }> | null;
+  return Array.isArray(rows) && rows[0]?.is_personal_cloud === true;
+}
+
+async function projectFunctionSlugs(token: string, projectRef: string): Promise<string[]> {
+  const response = await managementFetch(token, `/projects/${projectRef}/functions`);
+  if (!response.ok) return [];
+  const rows = await response.json().catch(() => null) as Array<{ slug?: unknown; name?: unknown }> | null;
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map((row) => typeof row.slug === "string" ? row.slug : typeof row.name === "string" ? row.name : "")
+    .filter(Boolean);
+}
+
+async function handleDiscoverPersonalClouds(token: string): Promise<NextResponse> {
+  const response = await managementFetch(token, "/projects");
+  if (!response.ok) {
+    return NextResponse.json({ ok: false, error: await upstreamMessage(response) }, { status: response.status });
+  }
+  const rows = await response.json() as Array<{
+    id?: unknown;
+    ref?: unknown;
+    name?: unknown;
+    status?: unknown;
+    organization_id?: unknown;
+  }>;
+  const named = (Array.isArray(rows) ? rows : []).filter((row) => row.name === "AI Phone Personal Cloud");
+  const projects: Array<{
+    projectRef: string;
+    name: string;
+    status: string;
+    organizationId: string;
+    functionSlugs: string[];
+  }> = [];
+
+  for (const row of named) {
+    const projectRefRaw = typeof row.ref === "string" ? row.ref : typeof row.id === "string" ? row.id : "";
+    const projectRef = cleanProjectRef(projectRefRaw);
+    if (!projectRef) continue;
+    if (!await hasPersonalCloudMarker(token, projectRef)) continue;
+    projects.push({
+      projectRef,
+      name: "AI Phone Personal Cloud",
+      status: typeof row.status === "string" ? row.status : "",
+      organizationId: typeof row.organization_id === "string" ? row.organization_id : "",
+      functionSlugs: await projectFunctionSlugs(token, projectRef),
+    });
+  }
+
+  return NextResponse.json({ ok: true, projects });
+}
+
 async function handleCreateProject(
   token: string,
   organizationSlug: string,
@@ -200,6 +261,7 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   try {
     if (payload.action === "organizations") return await handleOrganizations(token);
+    if (payload.action === "discover_personal_clouds") return await handleDiscoverPersonalClouds(token);
     if (payload.action === "create_project") {
       const organizationSlug = cleanOrganizationSlug(payload.organizationSlug);
       if (!organizationSlug) return NextResponse.json({ ok: false, error: "组织标识不合法。" }, { status: 400 });
