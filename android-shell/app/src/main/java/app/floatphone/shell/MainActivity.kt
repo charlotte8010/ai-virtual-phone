@@ -30,7 +30,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 
 /**
  * Float 小手机安卓壳：原生 WebView 直接加载线上站点。
@@ -88,13 +87,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * App 模式：顶部 Android 状态栏常驻，只隐藏底部导航栏。
-     * 不再进入真正的全屏/沉浸式布局，避免侧滑返回先被系统用于“唤出状态栏”。
+     * 普通 App 模式：Android 顶部状态栏和底部导航栏都常驻。
+     * 不再使用沉浸式/全屏系统栏策略，避免第一次边缘手势只把系统栏拉出来。
      */
     @Suppress("DEPRECATION")
     private fun enterImmersiveMode() {
         window.statusBarColor = Color.BLACK
-        window.navigationBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.BLACK
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val attrs = window.attributes
@@ -102,17 +101,16 @@ class MainActivity : AppCompatActivity() {
             window.attributes = attrs
         }
 
-        // WebView 从状态栏下方开始布局；顶部栏始终可见。
+        // WebView 完整布局在系统栏之间，上下系统栏始终可见。
         WindowCompat.setDecorFitsSystemWindows(window, true)
         WindowCompat.getInsetsController(window, window.decorView).apply {
-            show(WindowInsetsCompat.Type.statusBars())
-            hide(WindowInsetsCompat.Type.navigationBars())
+            show(WindowInsetsCompat.Type.systemBars())
             isAppearanceLightStatusBars = false
-            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            isAppearanceLightNavigationBars = false
         }
 
-        // 清掉 FULLSCREEN / LAYOUT_FULLSCREEN / IMMERSIVE_STICKY，只保留底部导航隐藏。
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+        // 清空旧版 FULLSCREEN / HIDE_NAVIGATION / IMMERSIVE 等 flags。
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -215,32 +213,51 @@ class MainActivity : AppCompatActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                // Float 大部分内部页面不产生 WebView URL 历史，而是靠页面自己的返回按钮切状态。
-                // 系统返回/侧滑先触发当前可见的页面返回按钮；没有按钮时再退 WebView 历史/后台。
+                // Float 内部页面多数是 React 状态切换，不一定产生 WebView URL 历史。
+                // 只允许点击左上区域的返回控件；右上“+”/菜单即使误用了 page-back-btn 也不会命中。
                 val script = """
                     (function () {
                       try {
                         var selectors = [
-                          '.page-back-btn',
                           'button[aria-label="返回"]',
-                          '[role="button"][aria-label="返回"]'
+                          '[role="button"][aria-label="返回"]',
+                          'a[aria-label="返回"]',
+                          'button[title="返回"]',
+                          '.page-back-btn'
                         ];
-                        var buttons = Array.prototype.slice.call(document.querySelectorAll(selectors.join(',')));
-                        for (var i = buttons.length - 1; i >= 0; i--) {
-                          var button = buttons[i];
+                        var nodes = Array.prototype.slice.call(document.querySelectorAll(selectors.join(',')));
+                        var best = null;
+                        var bestScore = Infinity;
+                        var maxLeft = Math.min(190, window.innerWidth * 0.32);
+                        var maxTop = Math.max(220, window.innerHeight * 0.22);
+
+                        for (var i = 0; i < nodes.length; i++) {
+                          var button = nodes[i];
                           var style = window.getComputedStyle(button);
                           var rect = button.getBoundingClientRect();
-                          if (
+                          var visible =
                             style.display !== 'none' &&
                             style.visibility !== 'hidden' &&
                             Number(style.opacity || '1') > 0 &&
                             rect.width > 0 && rect.height > 0 &&
                             rect.bottom > 0 && rect.right > 0 &&
-                            rect.top < window.innerHeight && rect.left < window.innerWidth
-                          ) {
-                            button.click();
-                            return true;
+                            rect.top < window.innerHeight && rect.left < window.innerWidth;
+                          if (!visible) continue;
+
+                          // 真正的页面返回键应该位于屏幕左上区域。
+                          // 这条规则明确排除聊天页右上角“+”和其弹出的右侧菜单。
+                          if (rect.left < 0 || rect.left > maxLeft || rect.top < 0 || rect.top > maxTop) continue;
+
+                          var score = rect.left * 3 + rect.top;
+                          if (score < bestScore) {
+                            bestScore = score;
+                            best = button;
                           }
+                        }
+
+                        if (best) {
+                          best.click();
+                          return true;
                         }
                       } catch (_) {}
                       return false;
