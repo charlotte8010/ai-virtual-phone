@@ -1,0 +1,104 @@
+name: Patch push reconnect wakeup
+
+on:
+  push:
+    paths:
+      - '.github/workflows/patch-push-wakeup.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'apply immediate push reconnect patch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply patch
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('android-shell/app/src/main/java/app/floatphone/shell/PushService.kt')
+          s = path.read_text()
+
+          old = '''    private var notifId = 100
+    private var shellSubRegistered = false
+'''
+          new = '''    private var notifId = 100
+    private var shellSubRegistered = false
+    private val reconnectSignal = Object()
+'''
+          assert old in s, 'field anchor missing'
+          s = s.replace(old, new, 1)
+
+          old = '''        if (intent?.action == ACTION_RECONFIGURE) {
+            shellSubRegistered = false
+            socket?.cancel()
+        }
+'''
+          new = '''        if (intent?.action == ACTION_RECONFIGURE) {
+            shellSubRegistered = false
+            socket?.cancel()
+            updateKeepAlive("正在连接个人云…")
+            synchronized(reconnectSignal) { reconnectSignal.notifyAll() }
+        }
+'''
+          assert old in s, 'reconfigure anchor missing'
+          s = s.replace(old, new, 1)
+
+          old = '''            if (config == null) {
+                updateKeepAlive("未登录或站点不可达，稍后重试")
+                sleepSec(60); continue
+            }
+'''
+          new = '''            if (config == null) {
+                updateKeepAlive("等待个人云配置…")
+                waitForReconnect(5); continue
+            }
+'''
+          assert old in s, 'config retry anchor missing'
+          s = s.replace(old, new, 1)
+
+          old = '''            updateKeepAlive("连接断开，重连中…")
+            sleepSec(if (closedNormally) 3 else backoffSec)
+'''
+          new = '''            updateKeepAlive("连接断开，重连中…")
+            waitForReconnect(if (closedNormally) 3 else backoffSec)
+'''
+          assert old in s, 'backoff anchor missing'
+          s = s.replace(old, new, 1)
+
+          old = '''    private fun sleepSec(sec: Long) {
+        runCatching { Thread.sleep(sec * 1000) }
+    }
+'''
+          new = '''    private fun waitForReconnect(sec: Long) {
+        synchronized(reconnectSignal) {
+            runCatching { reconnectSignal.wait(sec * 1000) }
+        }
+    }
+
+    private fun sleepSec(sec: Long) {
+        runCatching { Thread.sleep(sec * 1000) }
+    }
+'''
+          assert old in s, 'sleep helper anchor missing'
+          s = s.replace(old, new, 1)
+
+          path.write_text(s)
+          PY
+
+      - name: Remove one-time workflow
+        run: rm .github/workflows/patch-push-wakeup.yml
+
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add android-shell/app/src/main/java/app/floatphone/shell/PushService.kt .github/workflows/patch-push-wakeup.yml
+          git commit -m "apply immediate push reconnect patch"
+          git push
