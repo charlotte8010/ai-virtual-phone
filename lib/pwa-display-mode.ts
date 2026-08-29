@@ -26,7 +26,7 @@ export type PwaHostedOverlayMetrics = {
 
 export const PWA_DISPLAY_MODE_COOKIE = "pwa_display_mode";
 export const PWA_DISPLAY_MODE_CHANGED_EVENT = "pwa-display-mode-changed";
-export const DEFAULT_PWA_DISPLAY_PREFERENCE: PwaDisplayPreference = "fullscreen";
+export const DEFAULT_PWA_DISPLAY_PREFERENCE: PwaDisplayPreference = "standalone";
 
 function decodeCookieValue(value: string): string {
   try {
@@ -49,13 +49,17 @@ export function writePwaDisplayPreference(preference: PwaDisplayPreference) {
   window.dispatchEvent(new CustomEvent(PWA_DISPLAY_MODE_CHANGED_EVENT, { detail: preference }));
 }
 
-/** Preserve the upstream default: mobile browsers request fullscreen unless Edge or explicitly disabled. */
+/**
+ * Do not invoke the browser Fullscreen API unless the user explicitly opted in.
+ * Chrome shows an unavoidable security toast whenever a page enters fullscreen;
+ * installed PWA/Android shell already provide app-like chrome without needing it.
+ */
 export function shouldRequestPwaFullscreen(): boolean {
   if (typeof document === "undefined" || typeof navigator === "undefined") return false;
   const preference = readPwaDisplayPreference(document.cookie);
   if (preference === "standalone") return false;
   if (preference === "fullscreen") return true;
-  return !/Edg/i.test(navigator.userAgent);
+  return false;
 }
 
 export function getRuntimePwaDisplayMode(): RuntimePwaDisplayMode {
