@@ -63,6 +63,15 @@ export function readPwaDisplayPreference(cookie: string): PwaDisplayPreference |
 export function writePwaDisplayPreference(preference: PwaDisplayPreference) {
   if (typeof document === "undefined") return;
   document.cookie = `${PWA_DISPLAY_MODE_COOKIE}=${preference}; path=/; max-age=31536000; samesite=lax`;
+  // Android 壳不再自行强制顶部状态栏；直接尊重 Float 的这一个设置。
+  try {
+    const shellWindow = window as Window & {
+      AndroidShell?: { setSystemStatusBarShown?: (shown: boolean) => void };
+    };
+    shellWindow.AndroidShell?.setSystemStatusBarShown?.(preference === "standalone");
+  } catch {
+    // 浏览器/PWA 没有原生桥时照常使用 manifest / Fullscreen API。
+  }
   // 用户手动重新选择全屏时，允许再尝试一次浏览器 Fullscreen API。
   fullscreenRequestAttempted = false;
   window.dispatchEvent(new CustomEvent(PWA_DISPLAY_MODE_CHANGED_EVENT, { detail: preference }));
@@ -103,13 +112,8 @@ export function getRuntimePwaDisplayMode(): RuntimePwaDisplayMode {
  *  用户也误判成非沉浸（这正是 pwa-manifest-injector 挂标记前要先过这道门的原因）。 */
 export function isNonImmersiveLayoutActive(): boolean {
   if (typeof document === "undefined") return false;
-  // Float Android 壳现在固定采用普通 App 布局：顶部状态栏、底部导航栏都常驻。
-  // WebView 本身不一定报告 standalone，cookie 也可能还是旧的 fullscreen；
-  // 这里直接识别原生壳，避免自定义应用继续按沉浸全屏多预留一截 safe-area。
-  if (typeof window !== "undefined" && typeof navigator !== "undefined") {
-    const shellWindow = window as Window & { AndroidShell?: unknown };
-    if (typeof shellWindow.AndroidShell !== "undefined" || /FloatShell\//i.test(navigator.userAgent)) return true;
-  }
+  // Android 壳也尊重同一份 cookie：standalone = 显示系统状态栏，
+  // fullscreen = 隐藏顶部系统栏并恢复 Float 自己的状态栏占位。
   return readPwaDisplayPreference(document.cookie) === "standalone"
     && getRuntimePwaDisplayMode() !== "fullscreen";
 }

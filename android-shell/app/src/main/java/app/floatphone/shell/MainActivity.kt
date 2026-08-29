@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var systemStatusBarShown = true
 
     private val fileChooserLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -87,36 +88,60 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 普通 App 模式：Android 顶部状态栏和底部导航栏都常驻。
-     * 不再使用沉浸式/全屏系统栏策略，避免第一次边缘手势只把系统栏拉出来。
+     * 系统栏策略：顶部 Android 状态栏尊重 Float「显示系统状态栏」设置；
+     * 底部导航栏始终保持显示，避免边缘返回手势第一次只是在唤出系统栏。
      */
     @Suppress("DEPRECATION")
-    private fun enterImmersiveMode() {
+    private fun applySystemBars() {
         window.statusBarColor = Color.BLACK
         window.navigationBarColor = Color.BLACK
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val attrs = window.attributes
-            attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+            attrs.layoutInDisplayCutoutMode = if (systemStatusBarShown) {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+            } else {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
             window.attributes = attrs
         }
 
-        // WebView 完整布局在系统栏之间，上下系统栏始终可见。
+        // 可见的系统栏由系统负责 inset：顶部隐藏时内容自然上移；底栏始终留出空间。
         WindowCompat.setDecorFitsSystemWindows(window, true)
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         WindowCompat.getInsetsController(window, window.decorView).apply {
-            show(WindowInsetsCompat.Type.systemBars())
+            show(WindowInsetsCompat.Type.navigationBars())
+            if (systemStatusBarShown) {
+                show(WindowInsetsCompat.Type.statusBars())
+            } else {
+                hide(WindowInsetsCompat.Type.statusBars())
+            }
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
+    }
 
-        // 清空旧版 FULLSCREEN / HIDE_NAVIGATION / IMMERSIVE 等 flags。
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+    private fun readSystemStatusBarPreference(url: String = SITE_URL): Boolean {
+        val cookies = CookieManager.getInstance().getCookie(url).orEmpty()
+        val mode = cookies.split(';')
+            .asSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("pwa_display_mode=") }
+            ?.substringAfter('=')
+            ?.trim()
+        return mode == "standalone"
+    }
+
+    private fun syncSystemBarPreferenceFromCookie(url: String = SITE_URL) {
+        systemStatusBarShown = readSystemStatusBarPreference(url)
+        applySystemBars()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enterImmersiveMode()
+        systemStatusBarShown = readSystemStatusBarPreference()
+        applySystemBars()
         // 音量键默认调媒体流：WebView 里的语音条/TTS 都走媒体流播放，
         // 不设的话短音频没在播时按键调的是铃声，用户感觉"音量键无效、声音巨大"
         volumeControlStream = AudioManager.STREAM_MUSIC
@@ -124,7 +149,7 @@ class MainActivity : AppCompatActivity() {
         webView = WebView(this)
         webView.setBackgroundColor(Color.BLACK)
         setContentView(webView)
-        enterImmersiveMode()
+        applySystemBars()
 
         webView.settings.apply {
             javaScriptEnabled = true
@@ -142,6 +167,7 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
+                syncSystemBarPreferenceFromCookie(url)
                 syncPushConfigFromWebView()
             }
 
@@ -378,12 +404,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        enterImmersiveMode()
+        syncSystemBarPreferenceFromCookie()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) enterImmersiveMode()
+        if (hasFocus) applySystemBars()
     }
 
     /** singleTask：App 已在运行时（如全屏来电页接听）通过 onNewIntent 送达深链 */
@@ -462,6 +488,15 @@ class MainActivity : AppCompatActivity() {
     inner class ShellBridge {
         @JavascriptInterface
         fun getVersion(): String = VERSION
+
+        /** Float 外观设置切换系统状态栏时立即同步到原生窗口。 */
+        @JavascriptInterface
+        fun setSystemStatusBarShown(shown: Boolean) {
+            runOnUiThread {
+                systemStatusBarShown = shown
+                applySystemBars()
+            }
+        }
 
         /** 打开本应用的系统设置页（引导用户关电池限制、开自启动）。 */
         @JavascriptInterface
