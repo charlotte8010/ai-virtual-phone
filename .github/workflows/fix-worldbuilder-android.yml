@@ -3,20 +3,15 @@ name: Fix World Builder Android flow
 on:
   push:
     branches: [main]
-    paths: [".github/workflows/fix-worldbuilder-android.yml"]
+    paths:
+      - ".github/workflows/fix-worldbuilder-android.yml"
 
 permissions:
   contents: write
 
 jobs:
-  fix-and-build:
+  fix:
     runs-on: ubuntu-latest
-    env:
-      SHELL_KEYSTORE_BASE64: ${{ secrets.SHELL_KEYSTORE_BASE64 }}
-      SHELL_KEYSTORE_PASSWORD: ${{ secrets.SHELL_KEYSTORE_PASSWORD }}
-      SHELL_KEY_ALIAS: ${{ secrets.SHELL_KEY_ALIAS }}
-      SHELL_KEY_PASSWORD: ${{ secrets.SHELL_KEY_PASSWORD }}
-      SHELL_SITE_URL: ${{ vars.SHELL_SITE_URL || 'https://ai-virtual-phone-ten-sigma.vercel.app' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,23 +24,19 @@ jobs:
           def replace_once(path, old, new):
               p = Path(path)
               text = p.read_text()
-              if old not in text:
-                  raise SystemExit(f"expected snippet missing in {path}")
-              if text.count(old) != 1:
-                  raise SystemExit(f"expected one snippet in {path}, got {text.count(old)}")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one snippet in {path}, got {count}")
               p.write_text(text.replace(old, new, 1))
 
-          # 1) Android shell: internal WebView schemes are never external browser intents.
           replace_once(
               "android-shell/app/src/main/java/app/floatphone/shell/MainActivity.kt",
               '                val scheme = url.scheme ?: return false\n',
               '                val scheme = url.scheme?.lowercase() ?: return false\n'
-              '                // about:/blob:/data:/javascript:/file: 都是 WebView/页面内部地址，\n'
-              '                // 不能交给 ACTION_VIEW；否则 window.open/about:blank、模型导出等会弹浏览器选择框。\n'
+              '                // WebView/page-internal URLs must stay inside Float.\n'
               '                if (scheme == "about" || scheme == "blob" || scheme == "data" || scheme == "javascript" || scheme == "file") return false\n'
           )
 
-          # 2) Android shell opens 筑境 in the current Float WebView instead of a popup.
           replace_once(
               "components/desktop-shell.tsx",
               '    const popup = window.open("", "_blank");\n\n    if (!popup) {\n',
@@ -59,29 +50,29 @@ jobs:
               '    if (!popup) {\n'
           )
 
-          # 3) 筑境 back is deterministic: popup desktop closes; same-window Android returns to Float root.
           replace_once(
               "components/world-builder/WorldBuilder.tsx",
               '''  const handleInitialBootBack = useCallback(() => {\n    if (window.opener && !window.opener.closed) {\n      window.opener.focus();\n    }\n    window.close();\n    window.setTimeout(() => {\n      if (!window.closed) window.location.replace("/");\n    }, 40);\n  }, []);\n''',
-              '''  const handleBackToPhone = useCallback(() => {\n    if (window.opener && !window.opener.closed) {\n      window.opener.focus();\n      window.close();\n      window.setTimeout(() => {\n        if (!window.closed) window.location.replace("/");\n      }, 40);\n      return;\n    }\n    // Android WebView / same-tab fallback: this route cannot be closed like a popup.\n    window.location.replace("/");\n  }, []);\n\n  const handleInitialBootBack = handleBackToPhone;\n'''
+              '''  const handleBackToPhone = useCallback(() => {\n    if (window.opener && !window.opener.closed) {\n      window.opener.focus();\n      window.close();\n      window.setTimeout(() => {\n        if (!window.closed) window.location.replace("/");\n      }, 40);\n      return;\n    }\n    window.location.replace("/");\n  }, []);\n\n  const handleInitialBootBack = handleBackToPhone;\n'''
           )
+
           replace_once(
               "components/world-builder/WorldBuilder.tsx",
               '          <button className="wb-topbar-btn" onClick={() => window.close()}>\n            返回\n          </button>\n',
               '          <button className="wb-topbar-btn wb-topbar-back" type="button" data-float-back="world-builder" aria-label="返回小手机" onClick={handleBackToPhone}>\n            返回\n          </button>\n'
           )
+
           replace_once(
               "components/world-builder/WorldBuilder.tsx",
               '            <button className="wb-initial-back" type="button" onClick={handleInitialBootBack}>\n',
               '            <button className="wb-initial-back" type="button" data-float-back="world-builder" onClick={handleInitialBootBack}>\n'
           )
 
-          # 4) Narrow-phone toolbar adaptation. Back stays reachable; the remaining tools scroll horizontally.
           css_path = Path("styles/world-builder.css")
           css = css_path.read_text()
           marker = "/* Float mobile World Builder adaptation */"
           if marker not in css:
-              css += r'''
+              css += '''
 
 /* Float mobile World Builder adaptation */
 @media (max-width: 600px) and (pointer: coarse) {
@@ -158,47 +149,10 @@ jobs:
           git diff --stat
 
       - name: Commit fixes
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add android-shell/app/src/main/java/app/floatphone/shell/MainActivity.kt components/desktop-shell.tsx components/world-builder/WorldBuilder.tsx styles/world-builder.css
           git commit -m "fix World Builder Android navigation and mobile UI"
           git push
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: "8.7"
-
-      - name: Sync web icon to Android
-        run: cp public/icon-512.png android-shell/app/src/main/res/drawable/appicon.png
-
-      - name: Decode stable debug keystore
-        run: |
-          base64 -d android-shell/ci-debug.keystore.b64 > /tmp/float-ci-debug.keystore
-          echo "SHELL_DEBUG_KEYSTORE_FILE=/tmp/float-ci-debug.keystore" >> "$GITHUB_ENV"
-
-      - name: Decode release keystore (optional)
-        if: ${{ env.SHELL_KEYSTORE_BASE64 != '' }}
-        run: |
-          echo "$SHELL_KEYSTORE_BASE64" | base64 -d > /tmp/shell.keystore
-          echo "SHELL_KEYSTORE_FILE=/tmp/shell.keystore" >> "$GITHUB_ENV"
-
-      - name: Build APKs
-        run: gradle -p android-shell assembleDebug assembleRelease
-
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: float-shell-debug-worldbuilder-fix
-          path: android-shell/app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Upload release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: float-shell-release-worldbuilder-fix
-          path: android-shell/app/build/outputs/apk/release/*.apk
