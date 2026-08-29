@@ -146,6 +146,9 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                // 自定义应用运行在 sandbox iframe 中。子 frame 的导航属于应用内部行为，
+                // 不能按“整个 Float 打开外链”处理，否则筑境等应用一点击就会跳系统浏览器。
+                if (!request.isForMainFrame) return false
                 val url = request.url
                 val scheme = url.scheme ?: return false
                 // 站内导航留在壳里；http(s) 外链和自定义协议（shortcuts:// 等）交给系统

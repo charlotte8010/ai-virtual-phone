@@ -151,7 +151,14 @@ ${body}
   --ai-phone-app-safe-left: ${embedded ? "0px" : "16px"};
   --ai-phone-app-safe-right: ${embedded ? "0px" : "16px"};
 }
-html, body { min-height: 100%; }
+html, body {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 100%;
+  margin: 0;
+  overflow-x: hidden;
+}
 * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
 </style>
 <script>
@@ -163,6 +170,43 @@ html, body { min-height: 100%; }
   var eventHandlers = {};
   var toolHandlers = {};
   var seq = 0;
+
+  // ── 导入应用的“返回/关闭”兼容 ──
+  // 很多独立 HTML 小应用会用 window.close() 或 history.back() 当“返回宿主”。
+  // 在 sandbox iframe 里 window.close() 默认无效；history.back() 也可能退到 about:blank。
+  // 给 iframe 压一层根哨兵：应用有自己的 history 时照常逐层返回，退到根时再关闭 Float 子应用。
+  try {
+    var rootState = { __aiPhoneAppRoot: true };
+    var guardState = { __aiPhoneAppGuard: true };
+    history.replaceState(rootState, '', location.href);
+    history.pushState(guardState, '', location.href);
+    window.addEventListener('popstate', function(event){
+      if (event && event.state && event.state.__aiPhoneAppRoot) {
+        try { request('app.close'); } catch (_) {}
+        try { history.forward(); } catch (_) {}
+      }
+    });
+  } catch (_) {}
+  try {
+    window.close = function(){
+      try { request('app.close'); } catch (_) {}
+    };
+  } catch (_) {}
+
+  // 导入应用里 _top/_parent/_blank 往往只是从“独立网页”时代留下的写法。
+  // 在 Float 里把它收回当前 iframe，避免越过宿主或触发 Android 外部浏览器。
+  document.addEventListener('click', function(event){
+    try {
+      var node = event && event.target;
+      var anchor = node && node.closest ? node.closest('a[href]') : null;
+      if (!anchor) return;
+      var target = String(anchor.getAttribute('target') || '').toLowerCase();
+      if (target !== '_blank' && target !== '_top' && target !== '_parent') return;
+      event.preventDefault();
+      var href = anchor.href;
+      if (href) window.location.href = href;
+    } catch (_) {}
+  }, true);
 
   // ── 首屏失败上报 ──
   // 沙盒里的异常既不冒泡到宿主 React，也不显示在界面上，出事就是一片白。
@@ -530,7 +574,12 @@ html, body { min-height: 100%; }
 })();
 </script>`;
 
-  const safeBridge = bridge;
+  // 有些导入包自己带完整 <html>，但没写 viewport；之前只有“片段 HTML”分支会补，
+  // Android 上就会按桌面宽度缩放。无论包形态都保证 viewport 存在。
+  const viewport = /<meta[^>]+name=["']viewport["']/i.test(base)
+    ? ""
+    : `<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />`;
+  const safeBridge = `${viewport}${bridge}`;
   if (/<head[\s>]/i.test(base)) {
     return base.replace(/<head([^>]*)>/i, `<head$1>${safeBridge}`);
   }
@@ -1994,7 +2043,7 @@ export function CustomAppRunner({
             <MoreHorizontal size={15} strokeWidth={2.4} />
           </button>
           <span className="cap-divider" />
-          <button type="button" className="cap-btn" onClick={onClose} aria-label={closeLabel}>
+          <button data-float-back="true" type="button" className="cap-btn" onClick={onClose} aria-label={closeLabel}>
             <Circle size={13} strokeWidth={2.4} />
           </button>
         </div>

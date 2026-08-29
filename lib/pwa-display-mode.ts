@@ -103,6 +103,13 @@ export function getRuntimePwaDisplayMode(): RuntimePwaDisplayMode {
  *  用户也误判成非沉浸（这正是 pwa-manifest-injector 挂标记前要先过这道门的原因）。 */
 export function isNonImmersiveLayoutActive(): boolean {
   if (typeof document === "undefined") return false;
+  // Float Android 壳现在固定采用普通 App 布局：顶部状态栏、底部导航栏都常驻。
+  // WebView 本身不一定报告 standalone，cookie 也可能还是旧的 fullscreen；
+  // 这里直接识别原生壳，避免自定义应用继续按沉浸全屏多预留一截 safe-area。
+  if (typeof window !== "undefined" && typeof navigator !== "undefined") {
+    const shellWindow = window as Window & { AndroidShell?: unknown };
+    if (typeof shellWindow.AndroidShell !== "undefined" || /FloatShell\//i.test(navigator.userAgent)) return true;
+  }
   return readPwaDisplayPreference(document.cookie) === "standalone"
     && getRuntimePwaDisplayMode() !== "fullscreen";
 }
