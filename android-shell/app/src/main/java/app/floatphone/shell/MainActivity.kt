@@ -151,6 +151,11 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(ShellBridge(), "AndroidShell")
 
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String) {
+                super.onPageFinished(view, url)
+                syncPushConfigFromWebView()
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url
                 val scheme = url.scheme ?: return false
@@ -253,6 +258,46 @@ class MainActivity : AppCompatActivity() {
         return target.takeIf { it.startsWith(SITE_URL) }
     }
 
+    /**
+     * 把网页 IndexedDB 中已经绑定的个人 Supabase 配置同步给原生后台推送。
+     * 页面侧配置可能在首次恢复/重新绑定后才出现，所以注入一个轻量定时同步；
+     * 原生端会比较配置，完全相同时不会反复重连。
+     */
+    private fun syncPushConfigFromWebView() {
+        val script = """
+            (function () {
+              if (window.__floatShellPushSyncInstalled) return;
+              window.__floatShellPushSyncInstalled = true;
+              function syncFloatPush() {
+                try {
+                  var req = indexedDB.open('AiPhoneKvDB');
+                  req.onsuccess = function () {
+                    try {
+                      var db = req.result;
+                      var tx = db.transaction('entries', 'readonly');
+                      var getReq = tx.objectStore('entries').get('ai_phone_cloud_backup_config_v1');
+                      getReq.onsuccess = function () {
+                        try {
+                          var row = getReq.result;
+                          var raw = row && row.value;
+                          if (!raw) return;
+                          var cfg = JSON.parse(raw);
+                          if (cfg && cfg.url && cfg.key && window.AndroidShell && window.AndroidShell.configurePush) {
+                            window.AndroidShell.configurePush(String(cfg.url), String(cfg.key), 'owner');
+                          }
+                        } catch (_) {}
+                      };
+                    } catch (_) {}
+                  };
+                } catch (_) {}
+              }
+              syncFloatPush();
+              window.setInterval(syncFloatPush, 5000);
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(script, null)
+    }
+
     private fun ensurePushService() {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -284,6 +329,12 @@ class MainActivity : AppCompatActivity() {
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
             }
+        }
+
+        /** 网页把个人云配置交给原生长连接；配置仅保存在本 App 私有目录。 */
+        @JavascriptInterface
+        fun configurePush(supabaseUrl: String, apiKey: String, userId: String) {
+            PushService.configure(this@MainActivity, supabaseUrl, apiKey, userId)
         }
 
         /** 请求忽略电池优化（保活关键一步）。 */

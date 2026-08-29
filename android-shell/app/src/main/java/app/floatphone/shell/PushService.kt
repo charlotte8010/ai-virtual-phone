@@ -38,11 +38,35 @@ class PushService : Service() {
         private const val CH_MESSAGES = "shell_messages"
         private const val CH_CALLS = "shell_calls"
         private const val NOTIF_FG_ID = 1
+        private const val PREFS = "float_shell_push"
+        private const val PREF_URL = "supabase_url"
+        private const val PREF_KEY = "api_key"
+        private const val PREF_USER = "user_id"
+        private const val ACTION_RECONFIGURE = "app.floatphone.shell.RECONFIGURE_PUSH"
         private var running = false
 
         fun start(context: Context) {
             if (running) return
             val intent = Intent(context, PushService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+            else context.startService(intent)
+        }
+
+        fun configure(context: Context, supabaseUrl: String, apiKey: String, userId: String) {
+            val url = supabaseUrl.trim().trimEnd('/')
+            val key = apiKey.trim()
+            val user = userId.trim().ifEmpty { "owner" }
+            if (!url.startsWith("https://") || key.isEmpty()) return
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val unchanged = prefs.getString(PREF_URL, "") == url &&
+                prefs.getString(PREF_KEY, "") == key &&
+                prefs.getString(PREF_USER, "") == user
+            if (unchanged) {
+                start(context)
+                return
+            }
+            prefs.edit().putString(PREF_URL, url).putString(PREF_KEY, key).putString(PREF_USER, user).apply()
+            val intent = Intent(context, PushService::class.java).setAction(ACTION_RECONFIGURE)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
             else context.startService(intent)
         }
@@ -69,7 +93,13 @@ class PushService : Service() {
         thread(name = "shell-push-loop") { connectionLoop() }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_RECONFIGURE) {
+            shellSubRegistered = false
+            socket?.cancel()
+        }
+        return START_STICKY
+    }
 
     override fun onDestroy() {
         stopped = true
@@ -99,8 +129,15 @@ class PushService : Service() {
 
     private data class PushConfig(val supabaseUrl: String, val anonKey: String, val userId: String)
 
-    /** 借 WebView 的登录 Cookie 调站点接口获取连接参数。 */
+    /**
+     * 优先使用 APK 从网页个人云配置同步过来的参数。这样不依赖站点账号登录，
+     * 也不会再卡在 /api/auth/me；旧站点 Cookie 方案仅保留作向后兼容兜底。
+     */
     private fun fetchConfig(): PushConfig? = runCatching {
+        loadPersonalConfig()?.let { config ->
+            registerPersonalShellSubscription(config)
+            return config
+        }
         val cookie = CookieManager.getInstance().getCookie(MainActivity.SITE_URL) ?: return null
 
         fun getJson(path: String): JSONObject? {
@@ -126,6 +163,36 @@ class PushService : Service() {
         registerShellSubscription(cookie, userId)
         PushConfig(url.trimEnd('/'), key, userId)
     }.getOrNull()
+
+    private fun loadPersonalConfig(): PushConfig? {
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val url = prefs.getString(PREF_URL, "").orEmpty().trim().trimEnd('/')
+        val key = prefs.getString(PREF_KEY, "").orEmpty().trim()
+        val userId = prefs.getString(PREF_USER, "owner").orEmpty().trim().ifEmpty { "owner" }
+        if (!url.startsWith("https://") || key.isEmpty()) return null
+        return PushConfig(url, key, userId)
+    }
+
+    /** 直接在个人 Supabase 网关注册 Android 壳订阅。 */
+    private fun registerPersonalShellSubscription(config: PushConfig) {
+        if (shellSubRegistered) return
+        runCatching {
+            val body = JSONObject()
+                .put("endpoint", "shell:${config.userId}")
+                .put("keys", JSONObject().put("p256dh", "shell").put("auth", "shell"))
+                .toString()
+                .toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("${config.supabaseUrl}/functions/v1/ai-phone-push?action=subscribe")
+                .header("x-ai-phone-service-key", config.anonKey)
+                .header("x-ai-phone-origin", MainActivity.SITE_URL)
+                .post(body)
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) shellSubRegistered = true
+            }
+        }
+    }
 
     /**
      * 在站点注册一条合成推送订阅（endpoint = shell:<userId>）。
@@ -205,7 +272,7 @@ class PushService : Service() {
                     val payload = msg.optJSONObject("payload") ?: return
                     if (payload.optString("event") != "notify") return
                     val body = payload.optJSONObject("payload") ?: return
-                    val title = body.optString("title").ifEmpty { "小手机" }
+                    val title = body.optString("title").ifEmpty { "Float" }
                     val text2 = body.optString("body").ifEmpty { "有新消息" }
                     // 来电：全屏来电通知（任何一步失败回落普通通知，主路不受影响）
                     if (body.optString("kind") == "call") {
@@ -276,7 +343,7 @@ class PushService : Service() {
     private fun buildKeepAliveNotification(text: String): Notification =
         NotificationCompat.Builder(this, CH_KEEPALIVE)
             .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle("小手机")
+            .setContentTitle("Float")
             .setContentText(text)
             .setOngoing(true)
             .setContentIntent(contentIntent())
