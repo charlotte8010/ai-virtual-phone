@@ -136,7 +136,7 @@ core-memory-builder.ts
 Commit 1 — Types & Compatibility          ✅
 Commit 2 — Atomic Extraction              ✅
 Commit 3 — Future Intent Immediate Path   ✅
-Commit 4 — Cognitive Retrieval v1         ← 当前下一步
+Commit 4 — Cognitive Retrieval v1         ✅
 ```
 
 工程门槛明确区分：
@@ -3338,7 +3338,7 @@ hotNewsSnapshots
 Commit 1 ✅
 Commit 2 ✅
 Commit 3 ✅
-Commit 4 ← 下一步
+Commit 4 ✅
 ```
 
 ---
@@ -3373,7 +3373,7 @@ Commit 4 ← 下一步
 
 ---
 
-## Commit 4 — Cognitive Retrieval v1
+## Commit 4 — Cognitive Retrieval v1 ✅
 
 修改：
 

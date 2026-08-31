@@ -109,6 +109,8 @@ export type MemoryConfig = {
     atomicMemoryExtractionEnabled?: boolean;
     futureIntentEnabled?: boolean;
     hybridRecallEnabled?: boolean;
+    maxSelectedLongTermMemories?: number;
+    maxProtectedFutureIntents?: number;
     memoryStabilityEnabled?: boolean;
     memoryLinksEnabled?: boolean;
     shortTermAllowedSources?: {
@@ -223,6 +225,9 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
     vnSummaryPrompt: "",
     atomicMemoryExtractionEnabled: true,
     futureIntentEnabled: true,
+    hybridRecallEnabled: true,
+    maxSelectedLongTermMemories: 10,
+    maxProtectedFutureIntents: 3,
     shortTermAllowedSources: {
         chat: true,
         group_chat: true,
