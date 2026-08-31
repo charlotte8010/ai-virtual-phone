@@ -7,7 +7,9 @@ import { DEFAULT_SUMMARIZATION_PROMPT } from "./memory-types";
 import {
     loadMemoryConfig,
     loadMemoryEntries,
+    loadMemoryEntriesByType,
     saveMemoryEntry,
+    deleteMemoryEntry,
     deleteMemoryEntries,
     getEventCounter,
     resetEventCounter,
@@ -16,13 +18,98 @@ import {
     incrementCoreMemoryCounter,
 } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
-import { loadNativeTimeline, formatTimelineForSummarization, filterTimelineByAllowedSources } from "./short-term-assembler";
+import {
+    loadNativeTimeline,
+    formatTimelineForSummarization,
+    filterTimelineByAllowedSources,
+    type NativeTimelineEntry,
+} from "./short-term-assembler";
 import { generateEmbedding, resolveEmbeddingModel } from "./memory-embedding";
 import { simpleLLMCall } from "./api-helpers";
 import { maybeRunCoreMemoryPipeline } from "./core-memory-builder";
+import { extractMemoriesFromModelOutput, type ExtractedMemoryCandidate } from "./memory-extraction";
+import { buildSourceEventSignature, findDuplicateMemory } from "./memory-dedupe";
 
 /** Per-character lock to prevent concurrent summarization. */
 const summarizingSet = new Set<string>();
+
+async function finalizeSummarization(
+    characterId: string,
+    characterName: string,
+    latest: string,
+    config: ReturnType<typeof loadMemoryConfig>,
+    newMemoryCount: number,
+): Promise<void> {
+    setLastSummarizedTimestamp(characterId, latest);
+    resetEventCounter(characterId);
+
+    const allLongTerm = await loadMemoryEntries(characterId);
+    if (allLongTerm.length > config.maxLongTermEntries) {
+        const excess = allLongTerm.slice(0, allLongTerm.length - config.maxLongTermEntries);
+        await deleteMemoryEntries(excess.map(e => e.id));
+    }
+
+    if (newMemoryCount > 0) {
+        incrementCoreMemoryCounter(characterId);
+        await maybeRunCoreMemoryPipeline(characterId, characterName);
+    }
+}
+
+function getSourceEventSignatures(
+    characterId: string,
+    candidate: ExtractedMemoryCandidate,
+    allEntries: NativeTimelineEntry[],
+): string[] {
+    if (!candidate.sourceEventRefs?.length) return [];
+    const entriesById = new Map(allEntries.map(entry => [entry.id, entry]));
+    return candidate.sourceEventRefs
+        .map(ref => entriesById.get(ref))
+        .filter((entry): entry is NativeTimelineEntry => Boolean(entry))
+        .map(entry => buildSourceEventSignature(
+            characterId,
+            entry.sourceApp,
+            entry.id,
+            entry.timestamp,
+            entry.content,
+        ));
+}
+
+function buildAtomicMemoryEntry(
+    characterId: string,
+    dominantSource: string,
+    earliest: string,
+    latest: string,
+    sourceSessionIds: string[],
+    allEntries: NativeTimelineEntry[],
+    candidate: ExtractedMemoryCandidate,
+    index: number,
+): MemoryEntry {
+    const now = new Date().toISOString();
+    const sourceEventSignatures = getSourceEventSignatures(characterId, candidate, allEntries);
+    return {
+        id: `mem_lt_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 8)}`,
+        characterId,
+        sourceApp: dominantSource as MemoryEntry["sourceApp"],
+        type: "long_term",
+        content: candidate.content,
+        importance: candidate.importance,
+        createdAt: now,
+        updatedAt: now,
+        tags: [...candidate.tags],
+        ...(candidate.mood ? { mood: candidate.mood } : {}),
+        kind: candidate.kind,
+        ...(candidate.futureIntent ? { futureIntent: { ...candidate.futureIntent } } : {}),
+        ...(candidate.sourceEventRefs ? { sourceMessageIds: [...candidate.sourceEventRefs] } : {}),
+        metadata: {
+            summarizedEvents: allEntries.length,
+            timeSpan: `${earliest} ~ ${latest}`,
+            sourceSessionIds,
+            extractionVersion: "atomic-v1",
+            extractionMode: "periodic",
+            ...(sourceEventSignatures.length > 0 ? { sourceEventSignatures } : {}),
+        },
+    };
+}
 
 /**
  * Check if summarization should run based on event counter, then execute.
@@ -101,10 +188,15 @@ export async function runSummarizationPipeline(
         .replace(/\{\{latest\}\}/gi, latest)
         .replace(/\{\{events\}\}/gi, eventsText);
 
+    const atomicExtractionEnabled = config.atomicMemoryExtractionEnabled !== false;
+    const extractionPrompt = atomicExtractionEnabled
+        ? `${summaryPrompt}\n\n请严格只输出 JSON，不要输出 Markdown 或解释文字。JSON 顶层必须是 {"memories":[]}。每条记忆必须包含 content、tags、importance、kind；只保存具有持续价值的信息，把互不相关的事件拆开，不要虚构，最多输出 8 条；没有值得长期保存的内容时输出 {"memories":[]}。importance 必须是 0 到 1 的数字，kind 只能是 event、relationship、user_fact、self_fact、knowledge、future_intent；kind 为 future_intent 时附带 futureIntent，其中 type 只能是 plan、promise、goal、wish、expectation，status 只能是 pending、overdue、fulfilled、cancelled，timePrecision 只能是 exact、day、range、vague、unknown。`
+        : summaryPrompt;
+
     // Call LLM for summarization — compatible with all providers
     const result = await simpleLLMCall(
         apiConfig,
-        [{ role: "user", content: summaryPrompt }],
+        [{ role: "user", content: extractionPrompt }],
         { temperature: 0.3 },
     );
 
@@ -118,16 +210,6 @@ export async function runSummarizationPipeline(
     }
 
     const summary = result.content;
-
-    // Generate embedding for the summary (only if vector recall is enabled)
-    let embedding: number[] | undefined;
-    const embeddingApiConfig = config.vectorRecallEnabled ? resolveAuxiliaryApiConfig("embeddingApiConfigId") : null;
-    if (embeddingApiConfig && resolveEmbeddingModel(embeddingApiConfig)) {
-        try {
-            const emb = await generateEmbedding(summary, embeddingApiConfig);
-            if (emb) embedding = emb;
-        } catch { /* ignore */ }
-    }
 
     // Determine sourceApp: use the most common source among summarized entries
     const sourceCounts = new Map<string, number>();
@@ -145,40 +227,102 @@ export async function runSummarizationPipeline(
             .filter((sessionId): sessionId is string => Boolean(sessionId)),
     ));
 
-    // Save as long-term memory
-    const now = new Date().toISOString();
-    const longTermEntry: MemoryEntry = {
-        id: `mem_lt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        characterId,
-        sourceApp: dominantSource as MemoryEntry["sourceApp"],
-        type: "long_term",
-        content: summary,
-        embedding,
-        importance: 0.8,
-        createdAt: now,
-        updatedAt: now,
-        metadata: {
-            summarizedEvents: allEntries.length,
-            timeSpan: `${earliest} ~ ${latest}`,
-            sourceSessionIds,
-        },
-    };
-    await saveMemoryEntry(longTermEntry);
+    if (!atomicExtractionEnabled) {
+        const embeddingApiConfig = config.vectorRecallEnabled
+            ? resolveAuxiliaryApiConfig("embeddingApiConfigId")
+            : null;
+        let embedding: number[] | undefined;
+        if (embeddingApiConfig && resolveEmbeddingModel(embeddingApiConfig)) {
+            try {
+                const emb = await generateEmbedding(summary, embeddingApiConfig);
+                if (emb) embedding = emb;
+            } catch { /* ignore */ }
+        }
 
-    // Update last summarized timestamp + reset counter
-    setLastSummarizedTimestamp(characterId, latest);
-    resetEventCounter(characterId);
-
-    // Enforce long-term limit
-    const allLongTerm = await loadMemoryEntries(characterId);
-    if (allLongTerm.length > config.maxLongTermEntries) {
-        const excess = allLongTerm.slice(0, allLongTerm.length - config.maxLongTermEntries);
-        await deleteMemoryEntries(excess.map(e => e.id));
+        const now = new Date().toISOString();
+        const longTermEntry: MemoryEntry = {
+            id: `mem_lt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            characterId,
+            sourceApp: dominantSource as MemoryEntry["sourceApp"],
+            type: "long_term",
+            content: summary,
+            embedding,
+            importance: 0.8,
+            createdAt: now,
+            updatedAt: now,
+            metadata: {
+                summarizedEvents: allEntries.length,
+                timeSpan: `${earliest} ~ ${latest}`,
+                sourceSessionIds,
+            },
+        };
+        await saveMemoryEntry(longTermEntry);
+        await finalizeSummarization(characterId, characterName, latest, config, 1);
+        console.log(`[MemorySummarizer] Summarized ${allEntries.length} entries → 1 legacy long-term memory`);
+        return { success: true };
     }
 
-    incrementCoreMemoryCounter(characterId);
-    await maybeRunCoreMemoryPipeline(characterId, characterName);
+    const extraction = extractMemoriesFromModelOutput(summary);
+    const embeddingApiConfig = config.vectorRecallEnabled
+        ? resolveAuxiliaryApiConfig("embeddingApiConfigId")
+        : null;
+    const embeddingEnabled = Boolean(embeddingApiConfig && resolveEmbeddingModel(embeddingApiConfig));
+    const existingMemories = await loadMemoryEntriesByType(characterId, "long_term");
+    const savedMemories: MemoryEntry[] = [];
+    let duplicateCount = 0;
 
-    console.log(`[MemorySummarizer] Summarized ${allEntries.length} entries → 1 long-term memory`);
+    for (const [index, candidate] of extraction.memories.entries()) {
+        const memoryEntry = buildAtomicMemoryEntry(
+            characterId,
+            dominantSource,
+            earliest,
+            latest,
+            sourceSessionIds,
+            allEntries,
+            candidate,
+            index,
+        );
+        const exactOrSourceDuplicate = findDuplicateMemory(memoryEntry, [...existingMemories, ...savedMemories]);
+        if (exactOrSourceDuplicate) {
+            duplicateCount += 1;
+            continue;
+        }
+
+        // Persist the text first. Embedding is an enhancement and must not cause data loss.
+        await saveMemoryEntry(memoryEntry);
+        let savedMemory = memoryEntry;
+        if (embeddingEnabled && embeddingApiConfig) {
+            try {
+                const embedding = await generateEmbedding(memoryEntry.content, embeddingApiConfig);
+                if (embedding) {
+                    const semanticDuplicate = findDuplicateMemory(
+                        { ...memoryEntry, embedding },
+                        [...existingMemories, ...savedMemories],
+                    );
+                    if (semanticDuplicate) {
+                        await deleteMemoryEntry(memoryEntry.id);
+                        duplicateCount += 1;
+                        continue;
+                    }
+                    savedMemory = {
+                        ...memoryEntry,
+                        embedding,
+                        updatedAt: new Date().toISOString(),
+                    };
+                    await saveMemoryEntry(savedMemory);
+                }
+            } catch (error) {
+                console.warn("[MemorySummarizer] Embedding failed; text memory was retained", error);
+            }
+        }
+        savedMemories.push(savedMemory);
+    }
+
+    await finalizeSummarization(characterId, characterName, latest, config, savedMemories.length);
+    console.log(
+        `[MemorySummarizer] Summarized ${allEntries.length} entries → ${savedMemories.length} atomic long-term memories`
+        + (duplicateCount > 0 ? ` (${duplicateCount} duplicates skipped)` : "")
+        + ` [${extraction.mode}]`,
+    );
     return { success: true };
 }

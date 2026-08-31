@@ -146,14 +146,17 @@ export const DEFAULT_SUMMARIZATION_PROMPT = `你是一个记忆整理助手。�
 {{events}}
 
 要求：
-- 用第三人称描述{{char}}和用户之间的互动
-- 保留关键事实：提到的名字、做出的承诺、情感变化、关系里程碑
-- 保留用户分享的具体信息（生日、偏好、习惯）
-- 保留朋友圈等非聊天事件中的关键信息
-- 100-200字
-- 不要包含格式标记
+- 只保存具有持续价值的信息；普通寒暄、即时状态、无后续意义的碎片不要保存
+- 把互不相关的事件拆成多条原子记忆，不要虚构
+- 保留人名、地名、时间、数字、明确承诺、关系变化和用户稳定事实
+- 每条记忆包含 2-6 个短标签，并动态判断 importance
+- kind 只能是 event、relationship、user_fact、self_fact、knowledge、future_intent
+- future_intent 必须附带 futureIntent，分类为 plan、promise、goal、wish 或 expectation
+- 最多输出 8 条；没有值得长期保存的内容时输出空数组
+- 严格只输出 JSON，不要 Markdown、标题或解释文字
 
-总结：`;
+输出格式：
+{"memories":[{"content":"...","tags":["..."],"importance":0.8,"kind":"event"}]}`;
 
 /**
  * Default core-memory summarization prompt template.
@@ -198,6 +201,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
     summarizationPrompt: DEFAULT_SUMMARIZATION_PROMPT,
     coreMemoryPrompt: DEFAULT_CORE_MEMORY_PROMPT,
     vnSummaryPrompt: "",
+    atomicMemoryExtractionEnabled: true,
     shortTermAllowedSources: {
         chat: true,
         group_chat: true,

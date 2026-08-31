@@ -132,5 +132,15 @@ assert.equal(dedupe.findDuplicateMemory({
     ...existing,
     metadata: { sourceEventSignatures: ["char-1:chat:event-7"] },
 }])?.id, "mem-1");
+assert.equal(dedupe.findDuplicateMemory({
+    ...existing,
+    id: "semantic-new",
+    content: "语义相近但措辞不同",
+    embedding: [1, 0],
+    createdAt: "2026-08-02T00:00:00.000Z",
+}, [{
+    ...existing,
+    embedding: [0.99, 0.1],
+}])?.id, "mem-1");
 
 console.log("memory extraction and dedupe tests passed");
