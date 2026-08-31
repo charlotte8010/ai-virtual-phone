@@ -7,6 +7,7 @@ import { kvGet, kvSet, registerKvMigration, registerDynamicPrefix } from "./kv-d
 import { openIndexedDbAtLeast } from "./idb-open";
 import { normalizeMemoryEntry } from "./memory-compat";
 import type { FutureIntentEvent } from "./future-intent-detector";
+import { dbWaitForMessagePersistence } from "./chat-db";
 
 // ── Long-term memory DB (unchanged from v1) ──
 
@@ -212,7 +213,7 @@ export function getEventCounter(characterId: string): number {
     return val ? parseInt(val, 10) || 0 : 0;
 }
 
-export function incrementEventCounter(characterId: string, event: FutureIntentEvent): number {
+function incrementEventCounterNow(characterId: string, event: FutureIntentEvent): number {
     const next = getEventCounter(characterId) + 1;
     if (typeof window !== "undefined") {
         kvSet(EVENT_COUNTER_PREFIX + characterId, String(next));
@@ -223,6 +224,38 @@ export function incrementEventCounter(characterId: string, event: FutureIntentEv
             .catch(error => console.warn("[FutureIntent] Immediate detection failed:", error));
     }
     return next;
+}
+
+export function incrementEventCounter(characterId: string, event: FutureIntentEvent): number {
+    if (
+        typeof window !== "undefined"
+        && event.sourceApp === "chat"
+        && event.sourceDetail === "direct"
+        && event.sessionId
+    ) {
+        const predictedNext = getEventCounter(characterId) + 1;
+        void (async () => {
+            // Chat must use the exact persisted message, never a guessed latest assistant.
+            if (!await dbWaitForMessagePersistence(event.id)) return;
+
+            const [{ loadChatSessions, loadChatContacts }, { loadCharacters }] = await Promise.all([
+                import("./chat-storage"),
+                import("./character-storage"),
+            ]);
+            const session = loadChatSessions().find(item => item.id === event.sessionId);
+            if (!session || session.isGroup) return;
+            const contact = loadChatContacts().find(item => item.id === session.contactId);
+            const resolvedCharacterId = contact?.characterId
+                || loadCharacters().find(item => item.id === session.contactId)?.id;
+            if (!resolvedCharacterId) return;
+
+            incrementEventCounterNow(resolvedCharacterId, event);
+        })()
+            .catch(error => console.warn("[FutureIntent] Persisted chat event detection failed:", error));
+        return predictedNext;
+    }
+
+    return incrementEventCounterNow(characterId, event);
 }
 
 export function resetEventCounter(characterId: string): void {

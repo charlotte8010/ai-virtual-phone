@@ -140,10 +140,36 @@ function safeParse<T>(raw: string | null): T[] {
     try { return raw ? JSON.parse(raw) : []; } catch { return []; }
 }
 
-// ── Async persistence helpers (fire-and-forget) ──
+// ── Async persistence helpers (fire-and-forget unless a caller needs durability confirmation) ──
 
-export function dbPutMessage(msg: ChatMessage): void {
-    chatDb.messages.put(msg).catch(err => console.warn("[ChatDB] put message failed:", err));
+const pendingMessageWrites = new Map<string, Promise<boolean>>();
+
+export function dbPutMessage(msg: ChatMessage): Promise<boolean> {
+    const write = chatDb.messages.put(msg)
+        .then(() => true)
+        .catch(err => {
+            console.warn("[ChatDB] put message failed:", err);
+            return false;
+        });
+    pendingMessageWrites.set(msg.id, write);
+    void write.finally(() => {
+        if (pendingMessageWrites.get(msg.id) === write) {
+            pendingMessageWrites.delete(msg.id);
+        }
+    });
+    return write;
+}
+
+/** Wait for the exact message write started by dbPutMessage, or verify it already exists. */
+export async function dbWaitForMessagePersistence(id: string): Promise<boolean> {
+    const pending = pendingMessageWrites.get(id);
+    if (pending) return pending;
+    try {
+        return Boolean(await chatDb.messages.get(id));
+    } catch (err) {
+        console.warn("[ChatDB] verify message persistence failed:", err);
+        return false;
+    }
 }
 
 export function dbPutMessages(msgs: ChatMessage[]): void {

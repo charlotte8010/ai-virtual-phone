@@ -186,7 +186,10 @@ export function normalizeFutureIntentCandidate(
         && Date.parse(targetEndAt) < Date.parse(targetAt),
     );
     const requiresTargetAt = ["exact", "day", "range"].includes(precision);
-    const invalidTemporalData = invalidRange || (requiresTargetAt && !targetAt);
+    const requiresTargetEndAt = precision === "range";
+    const invalidTemporalData = invalidRange
+        || (requiresTargetAt && !targetAt)
+        || (requiresTargetEndAt && !targetEndAt);
     const normalizedPrecision = ["exact", "day", "range"].includes(precision)
         && invalidTemporalData
         ? "unknown"

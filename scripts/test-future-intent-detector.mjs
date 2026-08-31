@@ -53,6 +53,19 @@ assert.deepEqual(chatMemoryEvent.toFutureIntentEvent(persistedAssistant), {
     sessionId: persistedAssistant.sessionId,
 });
 
+const chatDbSource = await readFile(new URL("../lib/chat-db.ts", import.meta.url), "utf8");
+const chatStorageSource = await readFile(new URL("../lib/chat-storage.ts", import.meta.url), "utf8");
+const chatEngineSource = await readFile(new URL("../lib/chat-engine.ts", import.meta.url), "utf8");
+const memoryStorageSource = await readFile(new URL("../lib/memory-storage.ts", import.meta.url), "utf8");
+const detectorSource = await readFile(new URL("../lib/future-intent-detector.ts", import.meta.url), "utf8");
+assert.match(chatStorageSource, /incrementEventCounter\(persistedSession\.contactId, toFutureIntentEvent\(newMsg\)\)/);
+assert.match(chatDbSource, /dbWaitForMessagePersistence/);
+assert.match(memoryStorageSource, /await dbWaitForMessagePersistence\(event\.id\)/);
+assert.match(memoryStorageSource, /const resolvedCharacterId = contact\?\.characterId/);
+assert.match(memoryStorageSource, /incrementEventCounterNow\(resolvedCharacterId, event\)/);
+assert.doesNotMatch(chatEngineSource, /incrementEventCounter/);
+assert.match(detectorSource, /isMemorySourceAllowed\(event\.sourceApp, event\.sourceDetail, config\.shortTermAllowedSources\)/);
+
 assert.equal(sourcePolicy.isMemorySourceAllowed("xiaohongshu", undefined, { xiaohongshu: false }), false);
 assert.equal(sourcePolicy.isMemorySourceAllowed("xiaohongshu", undefined, { xiaohongshu: true }), true);
 assert.equal(sourcePolicy.isMemorySourceAllowed("chat", "group", { group_chat: false }), false);
@@ -143,6 +156,18 @@ const normalizedMissingRangeStart = detector.normalizeFutureIntentCandidate({
 assert.equal(normalizedMissingRangeStart?.futureIntent?.timePrecision, "unknown");
 assert.equal(normalizedMissingRangeStart?.futureIntent?.targetAt, undefined);
 assert.equal(normalizedMissingRangeStart?.futureIntent?.targetEndAt, undefined);
+const normalizedMalformedRangeEnd = detector.normalizeFutureIntentCandidate({
+    ...vagueInput,
+    futureIntent: {
+        type: "plan",
+        timePrecision: "range",
+        targetAt: "2026-09-04T20:00:00+08:00",
+        targetEndAt: "not-a-date",
+    },
+}, timeContext);
+assert.equal(normalizedMalformedRangeEnd?.futureIntent?.timePrecision, "unknown");
+assert.equal(normalizedMalformedRangeEnd?.futureIntent?.targetAt, undefined);
+assert.equal(normalizedMalformedRangeEnd?.futureIntent?.targetEndAt, undefined);
 assert.equal(detector.normalizeFutureIntentCandidate({ ...vagueInput, kind: "event" }, timeContext), null);
 
 const parsed = detector.parseFutureIntentModelOutput(JSON.stringify({
@@ -272,9 +297,49 @@ const eventB = { ...event, id: "event_b", content: "明晚八点一起看电影"
 const firstPromise = queue.enqueue("char_queue", eventA);
 await Promise.resolve();
 const secondPromise = queue.enqueue("char_queue", eventB);
+const repeatedPendingPromise = queue.enqueue("char_queue", eventB);
+assert.strictEqual(repeatedPendingPromise, secondPromise);
 assert.deepEqual(calls, ["event_a"]);
 releaseFirst();
 await Promise.all([firstPromise, secondPromise]);
 assert.deepEqual(calls, ["event_a", "event_b"]);
+assert.deepEqual(await queue.enqueue("char_queue", eventB), {
+    status: "skipped",
+    reason: "event_already_scanned",
+});
+assert.deepEqual(calls, ["event_a", "event_b"]);
+
+const midnightContexts = [];
+let releaseMidnightBlocker;
+const midnightBlocker = new Promise((resolve) => {
+    releaseMidnightBlocker = resolve;
+});
+const midnightQueue = detector.createFutureIntentDetectionQueue(async (_characterId, queuedEvent) => {
+    if (queuedEvent.id === "midnight_blocker") await midnightBlocker;
+    midnightContexts.push(detector.resolveFutureIntentTimeContext(
+        queuedEvent,
+        "Asia/Shanghai",
+        new Date("2026-09-01T16:05:00.000Z"),
+    ).now.toISOString());
+    return { status: "no_candidate" };
+});
+const midnightBlockerEvent = {
+    ...event,
+    id: "midnight_blocker",
+    timestamp: "2026-09-01T15:58:00.000Z",
+    content: "普通聊天",
+};
+const queuedBeforeMidnight = {
+    ...event,
+    id: "midnight_tomorrow",
+    timestamp: "2026-09-01T15:59:50.000Z",
+    content: "明天一起吃饭",
+};
+const midnightFirst = midnightQueue.enqueue("char_midnight", midnightBlockerEvent);
+await Promise.resolve();
+const midnightSecond = midnightQueue.enqueue("char_midnight", queuedBeforeMidnight);
+releaseMidnightBlocker();
+await Promise.all([midnightFirst, midnightSecond]);
+assert.equal(midnightContexts[1], queuedBeforeMidnight.timestamp);
 
 console.log("future intent detector tests passed");
