@@ -55,7 +55,9 @@ export function sanitizeMigrationValue(value: unknown, options: { rootPath?: str
 
 export async function sha256Fingerprint(input: ArrayBuffer | Uint8Array | Blob): Promise<string> {
   const bytes = input instanceof Blob ? new Uint8Array(await input.arrayBuffer()) : input instanceof Uint8Array ? input : new Uint8Array(input);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const digestInput = new Uint8Array(bytes.byteLength);
+  digestInput.set(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", digestInput.buffer as ArrayBuffer);
   return `sha256:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 

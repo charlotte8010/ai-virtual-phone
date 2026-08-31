@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 36862)
-Total output lines: 3397
-
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type TouchEvent, type UIEvent, type WheelEvent } from "react";
@@ -1493,7 +1490,722 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
       }
       let width = sourceWidth;
       let height = sourceHeight;
-      if (width…6862 tokens truncated…X) * 1.12) return;
+      if (width > maxSize || height > maxSize) {
+        if (width > height) {
+          height = Math.round(height / width * maxSize);
+          width = maxSize;
+        } else {
+          width = Math.round(width / height * maxSize);
+          height = maxSize;
+        }
+      }
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        URL.revokeObjectURL(objectUrl);
+        return;
+      }
+      context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        URL.revokeObjectURL(objectUrl);
+        if (!blob) return;
+        saveChatImageToIndexedDB(blob).then((assetId) => {
+          const preview = URL.createObjectURL(blob);
+          setDraft(prev => ({ ...prev, image: { assetId, dataUrl: preview, width: canvas.width, height: canvas.height } }));
+          setImageMap(prev => ({ ...prev, [assetId]: preview }));
+        });
+      }, "image/jpeg", 0.82);
+    };
+    image.src = objectUrl;
+    event.target.value = "";
+  }
+
+  async function handleProfileCoverChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const image = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      const maxWidth = 1440;
+      let width = image.width;
+      let height = image.height;
+      if (width > maxWidth) {
+        height = Math.round(height / width * maxWidth);
+        width = maxWidth;
+      }
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        URL.revokeObjectURL(objectUrl);
+        return;
+      }
+      context.drawImage(image, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        URL.revokeObjectURL(objectUrl);
+        if (!blob) return;
+        saveChatImageToIndexedDB(blob).then((assetId) => {
+          const preview = URL.createObjectURL(blob);
+          setImageMap(prev => ({ ...prev, [assetId]: preview }));
+          setState((current) => saveXiaohongshuState({
+            ...current,
+            profile: {
+              ...current.profile,
+              coverImageAssetId: assetId,
+            },
+          }));
+        });
+      }, "image/jpeg", 0.84);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+    };
+    image.src = objectUrl;
+  }
+
+  async function handlePublish() {
+    if (busy !== "idle" || (!draft.title.trim() && !draft.body.trim())) return;
+    setBusy("publish");
+    clearErrorState();
+    try {
+      const userNote = createUserXiaohongshuNote({ ...draft, tags: tagInput.split(/[,，、#\s]+/).filter(Boolean) }, state.profile);
+      let current = saveXiaohongshuState({
+        ...state,
+        notes: [userNote, ...state.notes],
+      });
+      setState(current);
+      setComposeOpen(false);
+      setDraft({ title: "", body: "", tags: [], image: {} });
+      setTagInput("");
+
+      setBusy("npc-reaction");
+      const npcReaction = await generateXiaohongshuNpcReactionForUserPost(userNote, current.settings);
+      const npcApplied = applyNpcReaction(userNote, npcReaction);
+      const npcFollowerAccounts = npcReaction.followerNames.map(makeNpcAccount);
+      let nextAfterNpc: XiaohongshuState = {
+        ...current,
+        notes: current.notes.map(note => note.id === userNote.id ? npcApplied.note : note),
+        notifications: [...npcApplied.notifications, ...current.notifications],
+      };
+      nextAfterNpc = addFollowersToState(nextAfterNpc, npcFollowerAccounts, userNote).next;
+      current = saveXiaohongshuState(nextAfterNpc);
+      setState(current);
+
+      setBusy("character-reaction");
+      for (const characterId of current.settings.participantCharacterIds) {
+        if (Math.random() * 100 > current.settings.sendToCharacterProbability) continue;
+        const character = characters.find(item => item.id === characterId);
+        if (!character) continue;
+        const latestNote = current.notes.find(note => note.id === userNote.id) ?? userNote;
+        const reaction = await generateXiaohongshuCharacterReactionToUserPost(characterId, latestNote, current.settings);
+        if (!reaction?.comment.trim()) continue;
+        const applied = applyCharacterReaction(latestNote, character, reaction);
+        const addedComment = findAddedCharacterComment(latestNote, applied.note, character);
+        let nextAfterCharacter: XiaohongshuState = {
+          ...current,
+          notes: current.notes.map(note => note.id === latestNote.id ? applied.note : note),
+          notifications: [...applied.notifications, ...current.notifications],
+        };
+        if (addedComment) {
+          const commentEvent = recordXiaohongshuCommentEvent({
+            characterId: character.id,
+            characterName: character.name,
+            note: latestNote,
+            comment: addedComment,
+            liked: reaction.liked,
+            saved: reaction.saved,
+          });
+          recordCharacterThreadCommentEvents(character, latestNote, applied.note, applied.threadComments);
+          touchCharacterMemory(character, toFutureIntentEvent(commentEvent));
+        }
+        if (reaction.followedAuthor) {
+          const followerResult = addFollowersToState(nextAfterCharacter, [makeCharacterAccount(character)], latestNote);
+          nextAfterCharacter = followerResult.next;
+          if (followerResult.added.length > 0) {
+            const followEvent = recordXiaohongshuFollowUserEvent({
+              characterId: character.id,
+              characterName: character.name,
+              userDisplayName: latestNote.authorName,
+            });
+            touchCharacterMemory(character, toFutureIntentEvent(followEvent));
+          }
+        }
+        current = saveXiaohongshuState(nextAfterCharacter);
+        setState(current);
+      }
+      onNotice?.("小红书笔记已发布");
+    } catch (err) {
+      handleGenerationError(err, "暂时无法发布小红书笔记。");
+    } finally {
+      setBusy("idle");
+    }
+  }
+
+  function handleToggleLike(note: XiaohongshuNote) {
+    setState((current) => {
+      let nextLiked = false;
+      const notes = current.notes.map((item) => {
+        if (item.id !== note.id) return item;
+        nextLiked = !item.liked;
+        return {
+          ...item,
+          liked: nextLiked,
+          likeCount: Math.max(0, item.likeCount + (item.liked ? -1 : 1)),
+          updatedAt: new Date().toISOString(),
+        };
+      });
+      return saveXiaohongshuState({
+        ...current,
+        notes,
+        userInteractions: {
+          ...current.userInteractions,
+          likedNoteIds: nextLiked ? addId(current.userInteractions.likedNoteIds, note.id) : removeId(current.userInteractions.likedNoteIds, note.id),
+        },
+      });
+    });
+  }
+
+  function handleToggleSave(note: XiaohongshuNote) {
+    setState((current) => {
+      let nextSaved = false;
+      const notes = current.notes.map((item) => {
+        if (item.id !== note.id) return item;
+        nextSaved = !item.saved;
+        return {
+          ...item,
+          saved: nextSaved,
+          saveCount: Math.max(0, item.saveCount + (item.saved ? -1 : 1)),
+          updatedAt: new Date().toISOString(),
+        };
+      });
+      return saveXiaohongshuState({
+        ...current,
+        notes,
+        userInteractions: {
+          ...current.userInteractions,
+          savedNoteIds: nextSaved ? addId(current.userInteractions.savedNoteIds, note.id) : removeId(current.userInteractions.savedNoteIds, note.id),
+        },
+      });
+    });
+  }
+
+  function handleToggleFollowAuthor(note: XiaohongshuNote) {
+    const account = makeAccountFromNote(note);
+    if (!account) return;
+    setState((current) => {
+      const key = accountKey(account);
+      const following = current.socialGraph.following;
+      const exists = following.some(item => accountKey(item) === key);
+      const nextFollowing = exists
+        ? following.filter(item => accountKey(item) !== key)
+        : [{ ...account, followedAt: new Date().toISOString() }, ...following];
+      return saveXiaohongshuState({
+        ...current,
+        profile: {
+          ...current.profile,
+          followingCount: nextFollowing.length,
+        },
+        socialGraph: {
+          ...current.socialGraph,
+          following: nextFollowing,
+        },
+      });
+    });
+  }
+
+  function handleVoteComment(comment: XiaohongshuComment, vote: "like" | "dislike") {
+    setState((current) => saveXiaohongshuState({
+      ...current,
+      notes: current.notes.map((note) => {
+        if (note.id !== comment.noteId) return note;
+        return {
+          ...note,
+          comments: note.comments.map((item) => {
+            if (item.id !== comment.id) return item;
+            if (vote === "like") {
+              const liked = !item.liked;
+              return {
+                ...item,
+                liked,
+                disliked: liked ? false : item.disliked,
+                likeCount: Math.max(0, item.likeCount + (liked ? 1 : -1)),
+                dislikeCount: liked && item.disliked ? Math.max(0, item.dislikeCount - 1) : item.dislikeCount,
+              };
+            }
+            const disliked = !item.disliked;
+            return {
+              ...item,
+              disliked,
+              liked: disliked ? false : item.liked,
+              dislikeCount: Math.max(0, item.dislikeCount + (disliked ? 1 : -1)),
+              likeCount: disliked && item.liked ? Math.max(0, item.likeCount - 1) : item.likeCount,
+            };
+          }),
+          updatedAt: new Date().toISOString(),
+        };
+      }),
+    }));
+  }
+
+  async function submitUserComment(options: { mentionCharacter?: Character; textOverride?: string } = {}) {
+    const text = (options.textOverride ?? commentDraft).trim();
+    if (busy !== "idle" || !selectedNote || !text) return;
+    const target = replyTarget && selectedNote.comments.some(comment => comment.id === replyTarget.id)
+      ? replyTarget
+      : undefined;
+    const mentionCharacter = options.mentionCharacter ?? findMentionCharacterInText(text);
+    const userComment = makeXiaohongshuComment({
+      noteId: selectedNote.id,
+      authorType: "user",
+      authorId: "user",
+      authorName: state.profile.nickname || "我",
+      text,
+      replyTo: target?.authorName,
+      replyToCommentId: target?.id,
+    });
+    let current = saveXiaohongshuState({
+      ...state,
+      notes: state.notes.map(note => note.id === selectedNote.id
+        ? {
+            ...note,
+            comments: [...note.comments, userComment],
+            commentCount: note.commentCount + 1,
+            updatedAt: new Date().toISOString(),
+          }
+        : note),
+      userInteractions: {
+        ...state.userInteractions,
+        commentedNoteIds: addId(state.userInteractions.commentedNoteIds, selectedNote.id),
+      },
+    });
+    setState(current);
+    setCommentDraft("");
+    setCommentComposerFocused(false);
+    setCommentEmojiOpen(false);
+    setCommentMentionOpen(false);
+    setReplyTarget(null);
+    setBusy(mentionCharacter ? "mention-reply" : "comment-reply");
+    clearErrorState();
+    try {
+      let latestNote = current.notes.find(note => note.id === selectedNote.id);
+      if (!latestNote) return;
+      if (mentionCharacter) {
+        const reaction = await generateXiaohongshuCharacterMentionReply(mentionCharacter.id, latestNote, userComment, target, current.settings);
+        if (!reaction) {
+          onNotice?.("该角色暂时没有可用的小红书回复配置");
+          return;
+        }
+        if (reaction.comment.trim()) {
+          const applied = applyCharacterMentionReply(latestNote, mentionCharacter, reaction, userComment.id);
+          const addedComment = findAddedCharacterComment(latestNote, applied.note, mentionCharacter);
+          if (addedComment) {
+            const replyEvent = recordXiaohongshuReplyEvent({
+              characterId: mentionCharacter.id,
+              characterName: mentionCharacter.name,
+              note: latestNote,
+              comment: addedComment,
+              targetComment: userComment,
+            });
+            recordCharacterThreadCommentEvents(mentionCharacter, latestNote, applied.note, applied.threadComments);
+            touchCharacterMemory(mentionCharacter, toFutureIntentEvent(replyEvent));
+          }
+          current = saveXiaohongshuState({
+            ...current,
+            notes: current.notes.map(note => note.id === latestNote?.id ? applied.note : note),
+            notifications: [...applied.notifications, ...current.notifications],
+          });
+          setState(current);
+        }
+        return;
+      }
+      const roleCharacterId = target?.authorType === "character"
+        ? target.authorId
+        : latestNote.source === "character"
+          ? latestNote.authorId
+          : "";
+      const character = roleCharacterId ? characters.find(item => item.id === roleCharacterId) : undefined;
+      if (character) {
+        try {
+          const reaction = await generateXiaohongshuCharacterReplyToUserComment(character.id, latestNote, userComment, target, current.settings);
+          if (reaction?.comment.trim()) {
+            const applied = applyCharacterCommentReply(latestNote, character, reaction, userComment.id);
+            const addedComment = findAddedCharacterComment(latestNote, applied.note, character);
+            if (addedComment) {
+              const replyEvent = recordXiaohongshuReplyEvent({
+                characterId: character.id,
+                characterName: character.name,
+                note: latestNote,
+                comment: addedComment,
+                targetComment: userComment,
+              });
+              recordCharacterThreadCommentEvents(character, latestNote, applied.note, applied.threadComments);
+              touchCharacterMemory(character, toFutureIntentEvent(replyEvent));
+            }
+            current = saveXiaohongshuState({
+              ...current,
+              notes: current.notes.map(note => note.id === latestNote?.id ? applied.note : note),
+              notifications: [...applied.notifications, ...current.notifications],
+            });
+            setState(current);
+            latestNote = applied.note;
+          }
+        } catch (err) {
+          handleGenerationError(err, "暂时无法生成评论回复。");
+        }
+      }
+      const npcReply = await generateXiaohongshuNpcReplyToUserComment(latestNote, userComment, current.settings, target);
+      const npcApplied = applyNpcCommentReply(latestNote, npcReply, userComment.id);
+      current = saveXiaohongshuState({
+        ...current,
+        notes: current.notes.map(note => note.id === latestNote?.id ? npcApplied.note : note),
+        notifications: [...npcApplied.notifications, ...current.notifications],
+      });
+      setState(current);
+    } catch (err) {
+      handleGenerationError(err, mentionCharacter ? "暂时无法生成@回复。" : "暂时无法生成评论回复。");
+    } finally {
+      setBusy("idle");
+    }
+  }
+
+  function handleSubmitUserComment() {
+    void submitUserComment();
+  }
+
+  async function handleLoadMoreComments(note: XiaohongshuNote) {
+    if (busy !== "idle") return;
+    const latestNote = state.notes.find(item => item.id === note.id) ?? note;
+    setBusy("more-comments");
+    clearErrorState();
+    try {
+      const reaction = await generateXiaohongshuNpcMoreComments(latestNote, state.settings);
+      const addedCount = reaction.comments.filter(comment => comment.text).length;
+      if (addedCount === 0) throw new Error("没有解析到新的小红书评论。");
+      const updatedNote = applyNpcMoreComments(latestNote, reaction);
+      setState(saveXiaohongshuState({
+        ...state,
+        notes: state.notes.map(item => item.id === latestNote.id ? updatedNote : item),
+      }));
+      onNotice?.(`已加载 ${addedCount} 条新评论`);
+    } catch (err) {
+      handleGenerationError(err, "暂时无法加载更多评论。");
+    } finally {
+      setBusy("idle");
+    }
+  }
+
+  function requestDeleteNote(note: XiaohongshuNote) {
+    setDeleteTarget({
+      type: "note",
+      noteId: note.id,
+      title: note.title.trim() || note.body.trim().slice(0, 24) || "这篇笔记",
+    });
+  }
+
+  function requestDeleteComment(comment: XiaohongshuComment) {
+    const note = state.notes.find(item => item.id === comment.noteId);
+    setDeleteTarget({
+      type: "comment",
+      comment,
+      noteTitle: note?.title.trim() || note?.body.trim().slice(0, 24) || "这篇笔记",
+    });
+  }
+
+  function handleDeleteComment(comment: XiaohongshuComment) {
+    const sourceNote = state.notes.find(note => note.id === comment.noteId);
+    const deletedCommentIdsForEvents = sourceNote ? collectCommentThreadIds(sourceNote.comments, comment.id) : new Set([comment.id]);
+    deletedCommentIdsForEvents.forEach(id => deleteXiaohongshuProjectionEventForComment(id));
+    setState((current) => {
+      const notes = current.notes.map((note) => {
+        if (note.id !== comment.noteId) return note;
+        const deletedCommentIds = collectCommentThreadIds(note.comments, comment.id);
+        const comments = note.comments.filter(item => !deletedCommentIds.has(item.id));
+        return {
+          ...note,
+          comments,
+          commentCount: Math.max(0, note.commentCount - deletedCommentIds.size),
+          updatedAt: new Date().toISOString(),
+        };
+      });
+      const targetNote = notes.find(note => note.id === comment.noteId);
+      return saveXiaohongshuState({
+        ...current,
+        notes,
+        userInteractions: {
+          ...current.userInteractions,
+          commentedNoteIds: targetNote && (comment.authorType !== "user" || noteHasUserComment(targetNote))
+            ? current.userInteractions.commentedNoteIds
+            : removeId(current.userInteractions.commentedNoteIds, comment.noteId),
+        },
+      });
+    });
+    if (replyTarget && deletedCommentIdsForEvents.has(replyTarget.id)) setReplyTarget(null);
+  }
+
+  function handleDeleteNote(noteId: string) {
+    deleteXiaohongshuProjectionEventsForNote(noteId);
+    setState((current) => saveXiaohongshuState({
+      ...current,
+      notes: current.notes.filter(note => note.id !== noteId),
+      feedHiddenNoteIds: removeId(current.feedHiddenNoteIds, noteId),
+      notifications: current.notifications.filter(notice => notice.noteId !== noteId),
+      userInteractions: {
+        likedNoteIds: removeId(current.userInteractions.likedNoteIds, noteId),
+        savedNoteIds: removeId(current.userInteractions.savedNoteIds, noteId),
+        commentedNoteIds: removeId(current.userInteractions.commentedNoteIds, noteId),
+      },
+    }));
+    setSelectedNoteId(null);
+    setVideoCommentsOpen(false);
+    setReplyTarget(null);
+    setCommentDraft("");
+    setCommentEmojiOpen(false);
+    setCommentMentionOpen(false);
+  }
+
+  function requestFeedAction(action: PendingFeedAction) {
+    if (busy !== "idle") return;
+    setPendingFeedAction(action);
+  }
+
+  function handleClearAllContent() {
+    const visibleFeedIds = new Set([...discoverNotes, ...nearbyNotes, ...videoNotes].map(note => note.id));
+    visibleFeedIds.forEach(noteId => deleteXiaohongshuProjectionEventsForNote(noteId));
+    setState((current) => saveXiaohongshuState({
+      ...current,
+      feedHiddenNoteIds: Array.from(new Set([...current.feedHiddenNoteIds, ...visibleFeedIds])),
+    }));
+    if (selectedNoteId && visibleFeedIds.has(selectedNoteId)) {
+      setSelectedNoteId(null);
+      setVideoCommentsOpen(false);
+    }
+    setMessagePanel(null);
+    setSelectedDmThreadId(null);
+    setReplyTarget(null);
+    setCommentDraft("");
+    setCommentEmojiOpen(false);
+    setCommentMentionOpen(false);
+    onNotice?.("首页推荐、附近和视频内容已清空");
+  }
+
+  function handleConfirmDelete() {
+    if (!deleteTarget) return;
+    if (deleteTarget.type === "note") {
+      handleDeleteNote(deleteTarget.noteId);
+    } else {
+      handleDeleteComment(deleteTarget.comment);
+    }
+    setDeleteTarget(null);
+  }
+
+  async function handleConfirmFeedAction() {
+    if (!pendingFeedAction) return;
+    const action = pendingFeedAction;
+    setPendingFeedAction(null);
+    if (action === "refresh") {
+      await handleGenerateHomeContent();
+    } else {
+      handleClearAllContent();
+    }
+  }
+
+  function handlePickCommentEmoji(emoji: string) {
+    setCommentDraft(prev => `${prev}${emoji}`);
+    setCommentComposerFocused(true);
+  }
+
+  function handleMentionCharacter(displayName: string) {
+    const mention = `@${displayName}`;
+    setCommentDraft((current) => {
+      const base = current.replace(/\s+$/g, "");
+      if (base.includes(mention)) return `${base} `;
+      return base ? `${base} ${mention} ` : `${mention} `;
+    });
+    setCommentMentionOpen(false);
+    setCommentEmojiOpen(false);
+    setCommentComposerFocused(true);
+  }
+
+  const commentToolbar = (
+    <>
+      {commentMentionOpen ? (
+        <div className="xhs-comment-mention-panel">
+          {followedMentionCharacters.length > 0 ? (
+            followedMentionCharacters.map(({ account, displayName, avatar }) => (
+              <button
+                key={`${account.type}:${account.id}`}
+                type="button"
+                onMouseDown={event => event.preventDefault()}
+                onClick={() => handleMentionCharacter(displayName)}
+                disabled={busy !== "idle"}
+              >
+                <span>{avatar ? <img src={avatar} alt="" /> : displayName.slice(0, 1)}</span>
+                <em>{displayName}</em>
+              </button>
+            ))
+          ) : (
+            <span className="xhs-comment-panel-empty">暂无已关注角色</span>
+          )}
+        </div>
+      ) : null}
+      {commentEmojiOpen ? (
+        <div className="xhs-comment-emoji-panel">
+          {XHS_DM_EMOJIS.map(emoji => (
+            <button
+              key={emoji}
+              type="button"
+              onMouseDown={event => event.preventDefault()}
+              onClick={() => handlePickCommentEmoji(emoji)}
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <div className="xhs-comment-toolbar">
+        <div className="xhs-comment-toolbar-icons">
+          <button
+            type="button"
+            className={commentMentionOpen ? "is-active" : ""}
+            aria-label="@已关注角色"
+            onMouseDown={event => event.preventDefault()}
+            onClick={() => {
+              setCommentMentionOpen(prev => !prev);
+              setCommentEmojiOpen(false);
+            }}
+            disabled={busy !== "idle"}
+          >
+            <AtSign size={22} strokeWidth={2.05} />
+          </button>
+          <button
+            type="button"
+            className={commentEmojiOpen ? "is-active" : ""}
+            aria-label="选择表情"
+            onMouseDown={event => event.preventDefault()}
+            onClick={() => {
+              setCommentEmojiOpen(prev => !prev);
+              setCommentMentionOpen(false);
+            }}
+            disabled={busy !== "idle"}
+          >
+            <Smile size={22} strokeWidth={2.05} />
+          </button>
+        </div>
+        <button
+          type="button"
+          className="xhs-comment-toolbar-send"
+          onClick={handleSubmitUserComment}
+          disabled={busy !== "idle" || !commentDraft.trim()}
+        >
+          {busy === "comment-reply" || busy === "mention-reply" ? <Loader2 className="cp-spin" size={15} /> : "发送"}
+        </button>
+      </div>
+    </>
+  );
+
+  function handleMainScroll(event: UIEvent<HTMLDivElement>) {
+    mainScrollTopRef.current = event.currentTarget.scrollTop;
+    if (selectedTab !== "profile") {
+      setProfileTopbarVisible(false);
+      return;
+    }
+    const nextVisible = event.currentTarget.scrollTop >= 58;
+    setProfileTopbarVisible(current => current === nextVisible ? current : nextVisible);
+  }
+
+  function openNote(noteId: string) {
+    mainScrollTopRef.current = mainScrollRef.current?.scrollTop ?? mainScrollTopRef.current;
+    setSelectedNoteId(noteId);
+    setCommentEmojiOpen(false);
+    setCommentMentionOpen(false);
+  }
+
+  function handleShareNote(note: XiaohongshuNote) {
+    const description = (note.type === "video"
+      ? note.videoDescription || note.imageDescription
+      : note.imageDescription) || "";
+    const share = {
+      type: "xiaohongshu_note",
+      authorName: note.authorName,
+      title: getXhsPlainText(note.title),
+      body: getXhsPlainText(note.body),
+      description: getXhsPlainText(description),
+      noteType: note.type,
+      tags: note.tags,
+      imageAssetId: note.imageAssetId,
+      coverIcon: note.coverIcon,
+      tone: note.tone,
+    } satisfies ChatSharePayload;
+    window.dispatchEvent(new CustomEvent("open-mini-chat", { detail: { share } }));
+    onNotice?.("选择聊天对象后发送小红书帖子");
+  }
+
+  function getSiblingVideo(direction: "previous" | "next") {
+    if (activeVideoNoteIndex < 0) return undefined;
+    const nextIndex = direction === "previous" ? activeVideoNoteIndex - 1 : activeVideoNoteIndex + 1;
+    return videoNotes[nextIndex];
+  }
+
+  function settleVideoDrag(nextNoteId?: string) {
+    if (videoSettleTimerRef.current !== null) {
+      window.clearTimeout(videoSettleTimerRef.current);
+    }
+    videoSettleTimerRef.current = window.setTimeout(() => {
+      if (nextNoteId) setSelectedNoteId(nextNoteId);
+      setVideoDragSettling(false);
+      setVideoDragOffset(0);
+      setVideoDragDirection(null);
+      videoSettleTimerRef.current = null;
+    }, 190);
+  }
+
+  function animateSiblingVideo(direction: "previous" | "next"): boolean {
+    if (selectedNote?.type !== "video" || videoCommentsOpen) return false;
+    const nextVideo = getSiblingVideo(direction);
+    if (!nextVideo) return false;
+    setVideoDragSettling(true);
+    setVideoDragDirection(direction);
+    setVideoDragOffset(direction === "next" ? -window.innerHeight : window.innerHeight);
+    settleVideoDrag(nextVideo.id);
+    return true;
+  }
+
+  function handleVideoWheel(event: WheelEvent<HTMLDivElement>) {
+    if (videoCommentsOpen) return;
+    const absY = Math.abs(event.deltaY);
+    if (absY < 42 || absY < Math.abs(event.deltaX)) return;
+    event.preventDefault();
+    const now = Date.now();
+    if (now - videoLastWheelAtRef.current < 520) return;
+    videoLastWheelAtRef.current = now;
+    animateSiblingVideo(event.deltaY > 0 ? "next" : "previous");
+  }
+
+  function handleVideoTouchStart(event: TouchEvent<HTMLDivElement>) {
+    if (videoCommentsOpen) return;
+    if (videoSettleTimerRef.current !== null) {
+      window.clearTimeout(videoSettleTimerRef.current);
+      videoSettleTimerRef.current = null;
+    }
+    setVideoDragSettling(false);
+    setVideoDragOffset(0);
+    setVideoDragDirection(null);
+    const touch = event.touches[0];
+    videoSwipeStartRef.current = touch ? { x: touch.clientX, y: touch.clientY } : null;
+  }
+
+  function handleVideoTouchMove(event: TouchEvent<HTMLDivElement>) {
+    if (videoCommentsOpen) return;
+    const start = videoSwipeStartRef.current;
+    const touch = event.touches[0];
+    if (!start || !touch) return;
+    const deltaX = touch.clientX - start.x;
+    const deltaY = touch.clientY - start.y;
+    const absY = Math.abs(deltaY);
+    if (absY < 2 || absY < Math.abs(deltaX) * 1.12) return;
     const direction = deltaY < 0 ? "next" : "previous";
     const nextVideo = getSiblingVideo(direction);
     if (!nextVideo) {

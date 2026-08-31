@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 31001)
-Total output lines: 2875
-
 // lib/chat-engine.ts
 
 import { createSseJsonParser } from "./sse-json";
@@ -1451,7 +1448,128 @@ export async function syncMusicData(): Promise<MusicSyncData> {
         loggedIn,
         playlistSummary,
         localSummary,
-        syncedAt: new Date().toISOString(),…1001 tokens truncated…dex = sessions.findIndex(session => session.id === sessionId);
+        syncedAt: new Date().toISOString(),
+    };
+    saveMusicSyncData(data);
+    return data;
+}
+
+export type ChatCompletionPart = {
+    text: string;
+    toolNotice?: string;
+};
+
+export type ChatCompletionResult = {
+    parts: ChatCompletionPart[];
+};
+
+/** Extract combined clean text from a ChatCompletionResult (for callers that need a plain string). */
+export function flattenCompletionResult(result: ChatCompletionResult): string {
+    return result.parts.map(p => stripTextToolDirectives(p.text)).filter(Boolean).join("\n\n");
+}
+
+// 单条消息工具循环轮数上限：设置项（聊天工具箱），默认 5
+const MAX_NATIVE_EXPANDED_TOOL_PACKAGES = 2;
+
+export function buildChatBilingualInstruction(
+    enabled: boolean | undefined,
+    mode: "single" | "group" = "single",
+    customPrompt?: string,
+): string {
+    return resolveBilingualPrompt(
+        enabled === true,
+        customPrompt,
+        mode === "group" ? DEFAULT_GROUP_CHAT_BILINGUAL_PROMPT : DEFAULT_CHAT_BILINGUAL_PROMPT,
+    );
+}
+
+export function buildOfflineBilingualInstruction(
+    enabled: boolean | undefined,
+    mode: "single" | "group" = "single",
+    customPrompt?: string,
+): string {
+    return resolveBilingualPrompt(
+        enabled === true,
+        customPrompt,
+        mode === "group" ? DEFAULT_GROUP_OFFLINE_CHAT_BILINGUAL_PROMPT : DEFAULT_OFFLINE_CHAT_BILINGUAL_PROMPT,
+    );
+}
+
+export type NativeChatToolBundle = {
+    definitions: LlmToolDefinition[];
+    nameMap: Map<string, string>;
+    displayNameMap: Map<string, string>;
+    loaderMap: Map<string, { sourceKey: string; label: string }>;
+    realToolSourceMap: Map<string, string>;
+};
+
+type NativeChatToolBuildOptions = {
+    actorNames?: string[];
+    characterName?: string;
+    userName?: string;
+};
+
+function stableToolHash(value: string): string {
+    let hash = 0;
+    for (const char of value) {
+        hash = ((hash * 31) + char.charCodeAt(0)) >>> 0;
+    }
+    return hash.toString(36).slice(0, 6);
+}
+
+function makeNativeToolName(displayName: string, used: Set<string>): string {
+    const base = displayName
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 40);
+    const prefix = base && /^[a-zA-Z_]/.test(base) ? base : "action";
+    let name = `${prefix}_${stableToolHash(displayName)}`.slice(0, 64);
+    let index = 2;
+    while (used.has(name)) {
+        name = `${prefix}_${stableToolHash(displayName)}_${index}`.slice(0, 64);
+        index += 1;
+    }
+    used.add(name);
+    return name;
+}
+
+export function nativeToolSourceKey(tool: EnabledTool): string {
+    return `${tool.source}:${tool.sourceId}`;
+}
+
+export function isNativeSingleTool(tool: EnabledTool): boolean {
+    if (tool.source === "rest") return true;
+    if (tool.source === "composite") return true;
+    if (tool.source === "custom_app") return true;
+    if (tool.source === "internal") {
+        const capability = getInternalCapability(tool.sourceId);
+        const subTools = capability ? getInternalCapabilitySubToolDefinitions(capability) : [];
+        return subTools.length === 0;
+    }
+    return false;
+}
+
+export function normalizeNativeExpandedToolSourceIds(sourceIds: string[] | undefined, enabledTools: EnabledTool[]): string[] {
+    const allowed = new Set(enabledTools.filter(tool => !isNativeSingleTool(tool)).map(nativeToolSourceKey));
+    const normalized: string[] = [];
+    for (const sourceId of sourceIds || []) {
+        if (!allowed.has(sourceId) || normalized.includes(sourceId)) continue;
+        normalized.push(sourceId);
+    }
+    return normalized.slice(-MAX_NATIVE_EXPANDED_TOOL_PACKAGES);
+}
+
+export function touchNativeExpandedToolSource(sourceIds: string[], sourceId: string): string[] {
+    const next = sourceIds.filter(id => id !== sourceId);
+    next.push(sourceId);
+    return next.slice(-MAX_NATIVE_EXPANDED_TOOL_PACKAGES);
+}
+
+export function persistNativeExpandedToolSourceIds(sessionId: string, sourceIds: string[]): void {
+    const sessions = loadChatSessions();
+    const index = sessions.findIndex(session => session.id === sessionId);
     if (index < 0) return;
     const next = [...sessions];
     next[index] = { ...next[index], nativeExpandedToolSourceIds: sourceIds };
