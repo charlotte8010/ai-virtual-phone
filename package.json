@@ -12,6 +12,7 @@
     "test:memory-compat": "node scripts/test-memory-compat.mjs",
     "test:memory-extraction": "node scripts/test-memory-extraction.mjs",
     "test:future-intent-detector": "node scripts/test-future-intent-detector.mjs",
+    "test:memory-ranking": "node scripts/test-memory-ranking.mjs",
     "test:migration-foundation": "node scripts/test-migration-foundation.mjs",
     "check:sdk": "node scripts/check-custom-app-sdk-consistency.mjs",
     "check:weixin": "node scripts/check-weixin-prompt-equivalence.mjs",
