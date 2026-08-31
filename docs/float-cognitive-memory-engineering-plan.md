@@ -1,9 +1,10 @@
 # Float Cognitive Memory Layer —— 工程实施设计文档
 
 > 面向仓库：`charlotte8010/ai-virtual-phone`  
-> 基准分支：`main`  
+> 上游同步基线：`main`  
+> 功能开发分支：`feature/cognitive-memory`  
 > 文档性质：工程实施版 / 可直接交给 Codex 拆分执行  
-> 更新日期：2026-08-31
+> 更新日期：2026-09-01
 
 ---
 
@@ -16,7 +17,8 @@
 3. **Sully 式“思考方式”应该以什么顺序接入；**
 4. **每个文件具体承担什么职责；**
 5. **如何保证旧数据、旧角色、现有跨 App 记忆不被破坏；**
-6. **如何做到失败可降级、改动可回滚、每个阶段可独立验收。**
+6. **如何做到失败可降级、改动可回滚、每个阶段可独立验收；**
+7. **如何在 Cognitive Retrieval MVP 完成后，尽快把 Sully 的完整生活数据迁入 Float，而不是只迁记忆。**
 
 最终目标不是复制 Sully，而是得到：
 
@@ -37,6 +39,122 @@ Memory Graph
 也就是：
 
 > Float 继续负责“角色经历了什么”，认知层负责“哪些经历会留下、什么时候想起来、会联想到什么、哪些记忆越来越牢”。
+
+---
+
+# 0.1 分支与上游同步策略
+
+本项目后续不建议直接在 `main` 上持续堆叠 Cognitive Memory 改造。
+
+仓库分支约定：
+
+```text
+原作者 upstream/main
+        │
+        ▼
+charlotte8010/ai-virtual-phone:main
+        │
+        ▼
+feature/cognitive-memory
+```
+
+职责划分：
+
+```text
+main
+→ 尽量作为接收、整理原作者更新的基线
+→ 不再直接承载大规模 Cognitive Memory 开发
+
+feature/cognitive-memory
+→ 承载本文档描述的记忆系统改造
+→ 原子记忆、Future Intent、Hybrid Retrieval、AccessCount、Memory Graph 等均优先在这里开发
+```
+
+当原作者仓库后续有更新时，推荐顺序：
+
+```text
+1. 获取 upstream/main 的最新更新
+2. 将更新同步进本 fork 的 main
+3. 确认 main 可正常构建和运行
+4. 再把 main 合并或 rebase 到 feature/cognitive-memory
+5. 只处理真正发生重叠的代码冲突
+```
+
+工程上应尽量采用：
+
+> **新增独立模块 + 对原文件做小范围接线**
+
+而不是把大量新逻辑直接塞进原作者原有核心文件。
+
+例如优先新增：
+
+```text
+lib/memory-extraction.ts
+lib/memory-dedupe.ts
+lib/future-intent-detector.ts
+lib/memory-ranking.ts
+lib/memory-text-search.ts
+lib/memory-links.ts
+```
+
+然后只在：
+
+```text
+memory-summarizer.ts
+memory-service.ts
+memory-storage.ts
+core-memory-builder.ts
+```
+
+进行必要的最小接线。
+
+这样做有三个目的：
+
+1. 降低与原作者后续更新发生 merge conflict 的概率；
+2. 当 upstream 修改朋友圈、小红书、查手机、UI 或其它模块时，可以更容易直接吸收；
+3. Cognitive Memory 本身可以作为相对独立的功能层测试、回滚和迁移。
+
+如果未来 upstream 也重构了记忆系统，不要求机械保留本分支的旧实现。应优先重新比较两边架构，再决定：
+
+```text
+继续 merge
+局部 transplant
+或重新基于新 upstream 适配 Cognitive Layer
+```
+
+也就是说，本分支的目标不是长期与 upstream 分叉，而是：
+
+> **让自定义认知记忆层尽可能保持低耦合，从而持续吃到原作者的新功能。**
+
+---
+
+# 0.2 当前进度与“可玩 / 搬家”门槛
+
+截至 2026-09-01，`feature/cognitive-memory` 已完成：
+
+```text
+Commit 1 — Types & Compatibility          ✅
+Commit 2 — Atomic Extraction              ✅
+Commit 3 — Future Intent Immediate Path   ✅
+Commit 4 — Cognitive Retrieval v1         ← 当前下一步
+```
+
+工程门槛明确区分：
+
+```text
+Commit 4 完成
+→ Cognitive Memory MVP 可玩
+→ 不再等待 AccessCount / Stability / Memory Graph
+→ 立即进入 Sully 搬家线
+
+Commit 5～7 完成
+→ Sully Full Backup Migration MVP
+→ 角色可带着旧聊天、朋友圈、日记、媒体、世界/剧情、记忆等历史继续在 Float 生活
+```
+
+因此后续优先级不是“把所有高级认知功能做完再迁移”，而是：
+
+> **先让记忆生成 + Future Intent + Cognitive Retrieval 闭环，再尽快搬家；长期巩固、生命周期、Memory Graph 在迁移后继续迭代。**
 
 ---
 
@@ -2393,179 +2511,334 @@ linkActivationScore
 
 ---
 
-# 56. Sully Importer —— 工程位置
+# 56. Sully Full Backup Migrator —— 工程目标
 
-后续新建：
+旧的 `lib/sully-memory-importer.ts` 单文件方案废弃。
 
-`lib/sully-memory-importer.ts`
+迁移目标从：
 
-但真正编码前必须先检查：
+```text
+Sully Memory Palace
+→ Float MemoryEntry
+```
 
-> Sully 当前实际备份 / 导出 JSON schema。
+升级为：
 
-不能凭文档猜导出结构。
+```text
+Sully Full Backup v3
+        │
+        ├── Native Life Projection
+        │   ├── user / characters
+        │   ├── chat / rich messages
+        │   ├── moments / comments / likes
+        │   ├── diary / media
+        │   ├── world / worldbook
+        │   ├── story / game / schedule / event box
+        │   └── VR 内容数据
+        │
+        ├── Cognitive Projection
+        │   ├── Memory Palace nodes
+        │   ├── windowsill → future_intent
+        │   ├── Legacy daily/monthly memories
+        │   └── Memory links（先保真保存，图能力完成后激活）
+        │
+        └── Migration Metadata / Raw Preservation
+```
+
+核心目标：
+
+> **能恢复成 Float 原生 App 数据的，就恢复成原生生活痕迹；不要把所有旧数据压成“角色记得曾经发生过”。**
+
+例如聊天必须优先恢复为 Float Chat 历史，而不是转换成一条长期记忆。
 
 ---
 
-# 57. Sully Memory Palace 导入映射
+# 57. 明确不迁移的数据
 
-推荐：
+本次 Sully → Float 迁移明确排除以下四类。迁移器发现它们时应记录 `skippedByPolicy`，但不写入 Float：
+
+1. **Pixel Home 状态**
+   - 像素小屋布局；
+   - 摆件位置；
+   - Pixel Home 专属运行状态。
+
+2. **Sully 专属房间 UI / 布局 / 即时状态**
+   - `roomState`；
+   - 房间摆放、视觉状态；
+   - 仅服务 Sully 房间 UI 的运行数据。
+
+   但如果所谓“房间数据”中存在真实用户内容，例如便签、待办、剧情文本，则仍应迁移到合适的 Float 数据域或保真归档，不能因为来源是房间功能而丢弃。
+
+3. **VR 特殊功能运行状态**
+   - 解锁状态；
+   - 当前会话状态；
+   - 播放/演出进度；
+   - 仅用于 Sully VR 功能恢复现场的 runtime state。
+
+   但 VR 小说、批注、信件、剧本、演出正文等**内容本体仍要迁移**。
+
+4. **热榜历史 / hotNewsSnapshots**
+   - 不导入当前新闻；
+   - 不进入记忆；
+   - 不进入兼容存档。
+
+除以上四类外，默认原则是：
+
+> **有价值的用户、角色、关系、聊天、内容、媒体、世界、剧情、日程和记忆数据尽量全部迁移。**
+
+---
+
+# 58. 迁移器工程位置与模块边界
+
+建议建立独立目录：
 
 ```text
-content
-→ content
+lib/migrations/sully-v3/
+  types.ts
+  parse-backup.ts
+  validate-backup.ts
+  asset-resolver.ts
+  id-map.ts
+  provenance.ts
 
-importance 1～10
-→ importance / 10
+  import-profile.ts
+  import-characters.ts
+  import-chat.ts
+  import-moments.ts
+  import-diary.ts
+  import-worlds.ts
+  import-story.ts
+  import-games.ts
+  import-schedules.ts
+  import-vr-content.ts
+  import-memory.ts
 
-tags
-→ tags
+  compat-archive.ts
+  migration-journal.ts
+  report.ts
+  index.ts
+```
 
-mood
-→ mood
+迁移层只做三类动作：
 
-accessCount
-→ accessCount
+```text
+A. Native projection
+Sully 原数据 → Float 原生 App store
 
-room
-→ cognitiveRoom
+B. Cognitive projection
+Sully Memory Palace / future / legacy → Cognitive Layer
 
-timestamp
-→ createdAt / source timestamp
+C. Preservation
+Float 当前没有对应原生落点、但属于有价值内容的数据 → compatibility archive
+```
 
-original ID
-→ metadata.sullyOriginalId
+禁止：
+
+```text
+“不知道放哪里”
+→ 让 LLM 总结成一条 memory
 ```
 
 ---
 
-# 58. Sully Import Metadata
+# 59. Parser / Dry-run / 版本校验
+
+正式写入前必须先解析完整备份并生成 dry-run。
+
+第一版正式支持：
+
+```text
+Sully full backup
+formatVersion = 3
+```
+
+解析器职责：
+
+```text
+ZIP manifest
+assets
+各 IndexedDB / KV 数据域
+角色与用户 ID
+跨表引用
+Memory Palace nodes / links / vectors
+```
+
+写入前报告至少包含：
 
 ```ts
-interface SullyImportMetadata {
-  importedFrom: "sully";
+interface SullyMigrationDryRun {
+  backupFormatVersion: number;
+  sourceFingerprint: string;
 
-  importVersion: "sully-palace-v1";
+  usersFound: number;
+  charactersFound: number;
+  messagesFound: number;
+  momentsFound: number;
+  diaryEntriesFound: number;
+  assetsFound: number;
 
-  sullyOriginalId: string;
+  palaceNodesFound: number;
+  palaceLinksFound: number;
+  legacyMemoriesFound: number;
 
-  sullyOriginalRoom?: string;
+  nativeConvertible: number;
+  archiveRequired: number;
+  skippedByPolicy: number;
 
-  sullyOriginalLinks?: unknown[];
-
-  importedAt: string;
+  warnings: string[];
 }
 ```
 
-实际可塞入：
+任何未知 formatVersion 默认：
+
+```text
+只 dry-run
+不写库
+```
+
+---
+
+# 60. ID Map、来源追踪与重复导入
+
+不能直接假设 Sully ID 在 Float 中安全。
+
+统一维护：
 
 ```ts
-metadata
+interface SullyMigrationIdMap {
+  users: Record<string, string>;
+  characters: Record<string, string>;
+  messages: Record<string, string>;
+  moments: Record<string, string>;
+  memories: Record<string, string>;
+  assets: Record<string, string>;
+}
 ```
 
-而不必另建 interface 入库。
-
----
-
-# 59. Sully ID 冲突
-
-不要直接：
+迁移后的记录至少保留：
 
 ```ts
-id = sullyNode.id;
+metadata: {
+  migrationSource: "sully_v3";
+  sullyOriginalId?: string;
+  sullyStore?: string;
+  sullyBackupFingerprint: string;
+  migratedAt: string;
+}
 ```
 
-推荐：
+迁移器必须做到幂等：
 
 ```text
-sully:<sourceCharacterId>:<originalId>
-```
-
-或者：
-
-```text
-新 UUID
-+
-metadata.sullyOriginalId
-```
-
-第二种更干净。
-
----
-
-# 60. Sully Embedding
-
-禁止直接混入 Float 向量空间。
-
-即使两个系统都写：
-
-```text
-embedding
-```
-
-也可能：
-
-- 模型不同；
-- dimension 不同；
-- provider 不同；
-- normalization 不同。
-
-导入流程：
-
-```text
-读取 Sully node
-↓
-保留文本
-↓
-忽略 Sully embedding
-↓
-保存 Float memory
-↓
-Float embeddingApiConfigId
-↓
-重新向量化
+同一个 backup fingerprint
++ 同一个 source record
+→ 重复执行时不能再次生成第二份数据
 ```
 
 ---
 
-# 61. Sully Windowsill
+# 61. Native Life Migration 映射原则
 
-不要：
-
-```text
-windowsill → 全部 plan
-```
-
-需要分类：
+优先恢复为 Float 原生数据：
 
 ```text
-明确时间约定
-→ plan
+Sully User/Profile
+→ Float user profile
 
-明确答应用户
-→ promise
+Sully Characters
+→ Float Character
 
-长期目标
-→ goal
+Sully character extras
+(privateImpression / dreams / relationshipStatus / activeRelationships / birthday / currentLocation / selectedVoice / voiceEngine / messagePersona / receiveSettings / proactive config / phone state 等)
+→ Float 已有原生字段优先投影 + per-character preserved payload
 
-想做但无日期
-→ wish
+Sully Messages
+→ Float ChatMessage / rich message
 
-对未来关系的期待
-→ expectation
+Sully Moments
+→ Float MomentPost / Comment / Like
+
+Sully Diary
+→ Float Diary
+
+Sully media/assets / gallery / voice favorites / stickers
+→ Float asset storage + 对应引用
+
+Sully room notes / todos / life records 等真实内容
+→ Diary / Custom App / timeline-compatible data 或 compatibility archive
+
+Sully World / WorldBook
+→ Float world / character context + preserved lore payload
+
+Sully Story / chapters
+→ Float Story / Adventure 可承载部分
+
+Sully Game records
+→ Float Game / timeline-compatible records
+
+Sully schedules / event boxes
+→ Float native schedule/event data（如有） + Future Intent projection
+
+Sully VR 小说 / 批注 / 信件 / 剧本 / 演出正文
+→ Float VN / Story / Co-create / archive 中最合适的数据域
+
+Sully guidebook / digest / 其它有时间戳的内容记录
+→ 对应 Float 内容域；无原生落点时保真 archive，并保留 timeline provenance
+
+Sully API presets / behavior config
+→ 仅迁非敏感结构与行为偏好；secret 按 #63.2 处理
 ```
 
-如果 Sully 原节点没有足够字段：
+特别要求：
 
-可以使用 Memory Summary API **只做分类**。
+> **迁移后的聊天、朋友圈、日记、剧情等应该继续进入 Float Unified Native Timeline。**
 
-不要重新总结原内容。
+这样角色不是只靠一批 imported memories “知道”旧生活，而是 Float 本身真的保存着过去的生活史。
 
 ---
 
-# 62. Sully Legacy 与 Palace 去重
+# 62. Cognitive Memory Migration
 
-Sully 同时可能有：
+## 62.1 Memory Palace
+
+Sully 结构化 Palace node 不重新总结，直接转换：
+
+```text
+content      → content
+importance   → normalize to 0..1
+tags         → tags
+mood         → mood
+accessCount  → accessCount
+room         → cognitiveRoom
+createdAt    → createdAt
+original ID  → metadata.sullyOriginalId
+```
+
+`cognitiveRoom` 仅用于兼容与高级认知，不作为 Float 运行前提。
+
+## 62.2 Windowsill
+
+不能简单：
+
+```text
+windowsill → plan
+```
+
+分类为：
+
+```text
+明确时间约定 → plan
+明确答应用户 → promise
+长期目标     → goal
+无日期愿望   → wish
+未来关系期待 → expectation
+```
+
+如果原节点字段不足，可调用 `memorySummaryApiConfigId` **只做结构分类与时间解析**，不得重新改写/压缩原记忆内容。
+
+## 62.3 Legacy memories
+
+Sully 可能同时有：
 
 ```text
 Memory Palace
@@ -2573,55 +2846,137 @@ Daily memories
 Monthly summaries
 ```
 
-推荐：
+原则：
 
 ```text
 Palace
-→ primary imported recall memory
+→ primary recall memory
 
 Daily / Monthly
-→ archive / fallback source
+→ gap filling / archive
 ```
 
-不要三套一起全部作为 long_term。
+禁止同一经历以三种形式重复进入 active long_term。
 
-否则同一件事会出现：
+## 62.4 Embedding
+
+Sully 原 embedding 不直接混入 Float 向量空间。
 
 ```text
-原始 Palace 节点
-+
-当天 Daily summary
-+
-当月 Monthly summary
+保留文本与旧向量元信息（如需要审计）
+→ Float memory 落库
+→ 使用当前 embeddingApiConfigId 重建活动 embedding
 ```
 
-召回时重复三次。
+Embedding 重建失败不能阻止正文迁移。
+
+## 62.5 Memory Links
+
+Sully link 必须保真保存来源 ID、类型、强度等原始信息。
+
+如果迁移时 Float `memory_links` active store 尚未实现：
+
+```text
+先进入 migration archive
++ 保存 ID map
++ 标记 waitingForActivation
+```
+
+后续 Memory Links commit 完成后，再通过 ID map 一次性激活。
+
+**不得为了提前搬家而丢弃 links，也不得要求先完成 Memory Graph 才允许迁移。**
 
 ---
 
-# 63. Sully Import Report
+# 63. Assets、兼容存档、Journal 与报告
 
-导入结束必须给出报告：
+## 63.1 Assets
+
+图片、语音、文件等实体资源：
+
+```text
+解析 ZIP asset
+→ 内容 hash
+→ 去重
+→ 写 Float asset storage
+→ 重写消息/朋友圈/日记中的引用
+```
+
+文件缺失时：
+
+```text
+保留原记录
++ 标记 missingAsset
+```
+
+不能因为一个附件缺失而丢整条聊天。
+
+## 63.2 API / Secret 配置
+
+API Preset 可以迁移非敏感配置结构，但 API Key、Token、密码类 secret 默认不自动复制。
+
+迁移报告只记录：
+
+```text
+secretPresent = true/false
+```
+
+禁止把 secret 写入日志。
+
+## 63.3 Compatibility Archive
+
+仅保存“有价值但 Float 当前没有原生数据模型”的内容。
+
+明确被 #57 排除的四类数据**不进入 archive**。
+
+## 63.4 Migration Journal
+
+每次导入保存：
 
 ```ts
-interface SullyImportReport {
-  palaceNodesFound: number;
-  imported: number;
-  duplicatesSkipped: number;
-  embeddingsRebuilt: number;
-  embeddingsFailed: number;
-
-  futureIntentClassified: number;
-  futureIntentUnresolved: number;
-
-  legacyEntriesFound: number;
-  legacyEntriesArchived: number;
-
+interface SullyMigrationRun {
+  id: string;
+  sourceFingerprint: string;
+  startedAt: string;
+  completedAt?: string;
+  status: "running" | "completed" | "failed" | "rolled_back";
+  createdRecordRefs: string[];
   warnings: string[];
 }
 ```
 
-这样迁移失败时有迹可查。
+为后续 rollback / retry 提供依据。
+
+## 63.5 Migration Report
+
+最终报告至少包括：
+
+```ts
+interface SullyMigrationReport {
+  charactersImported: number;
+  messagesImported: number;
+  momentsImported: number;
+  diaryEntriesImported: number;
+  assetsImported: number;
+  assetsMissing: number;
+
+  palaceNodesImported: number;
+  futureIntentClassified: number;
+  futureIntentUnresolved: number;
+  legacyEntriesArchived: number;
+  linksPreserved: number;
+
+  nativeRecordsImported: number;
+  compatibilityRecordsArchived: number;
+  skippedByPolicy: number;
+  duplicatesSkipped: number;
+
+  embeddingsRebuilt: number;
+  embeddingsFailed: number;
+
+  warnings: string[];
+}
+```
 
 ---
 
@@ -2946,17 +3301,29 @@ spreading activation
 
 ---
 
-## 后期新建 `lib/sully-memory-importer.ts`
+## Commit 5 起新增 `lib/migrations/sully-v3/`
 
-职责：
+核心职责：
 
 ```text
-parse Sully export
-map Palace nodes
-preserve metadata
-dedupe legacy
-re-embed
-migration report
+parse / validate Sully full v3 backup
+dry-run
+asset resolution
+ID mapping / provenance
+native app projection
+cognitive memory projection
+compatibility preservation
+migration journal / idempotency
+report / rollback support
+```
+
+明确排除：
+
+```text
+Pixel Home 状态
+Sully 房间 UI / 布局 / runtime state
+VR 特殊 runtime state
+hotNewsSnapshots
 ```
 
 ---
@@ -2965,85 +3332,44 @@ migration report
 
 不要让 Codex 一次完成整个系统。
 
----
-
-## Commit 1 — Types & Compatibility
-
-修改：
+当前状态：
 
 ```text
-memory-types.ts
-compat helpers
+Commit 1 ✅
+Commit 2 ✅
+Commit 3 ✅
+Commit 4 ← 下一步
 ```
-
-新增字段，但不改变运行行为。
-
-### 验收
-
-- build 通过；
-- 旧数据读取通过；
-- 现有聊天行为完全不变。
 
 ---
 
-## Commit 2 — Atomic Extraction
+## Commit 1 — Types & Compatibility ✅
 
-修改：
+已完成。
 
-```text
-memory-summarizer.ts
-memory-extraction.ts
-memory-dedupe.ts
-```
-
-### 验收
-
-80 events 可以得到：
-
-```text
-0～N atomic memories
-```
-
-而不是固定 1 条。
-
-必须验证：
-
-- JSON 正常；
-- JSON 非法 fallback；
-- embedding fail 不丢正文；
-- importance 不再固定 0.8；
-- tags 正常；
-- kind 正常。
+核心：新认知字段 optional + read-time compatibility。
 
 ---
 
-## Commit 3 — Future Intent Immediate Path
+## Commit 2 — Atomic Extraction ✅
 
-新增：
+已完成。
 
-```text
-future-intent-detector.ts
-```
-
-接入 Native Event 后的合适位置。
-
-### 验收
-
-输入：
+核心：
 
 ```text
-“明晚八点一起看电影”
+80 events → 0..N atomic memories
 ```
 
-不需要等 80 events。
+并保留 provenance、per-memory sourceApp、fallback 和 embedding failure survival。
 
-立刻出现：
+---
 
-```text
-future_intent
-pending
-targetAt...
-```
+## Commit 3 — Future Intent Immediate Path ✅
+
+已完成。
+
+核心：Future Intent 不再等待 periodic 80-event extraction。
 
 ---
 
@@ -3057,116 +3383,226 @@ memory-ranking.ts
 memory-text-search.ts
 ```
 
-### 验收
+### 目标
 
-即使 500 条长期记忆全部能塞入 token budget：
+完成 Cognitive Memory MVP 的“想起”闭环。
 
-> 也只选择最相关的有限集合。
-
-并验证：
+必须做到：
 
 ```text
-向量失败 → keyword/recent fallback 正常
-专有名词 → keyword 可召回
-今天计划 → future channel 可召回
+即使所有 long_term 都放得下
+→ 仍执行认知筛选
+
+vector + keyword + tag + importance + recency + temporal
+→ 选有限集合
+
+今天 / 明天 / critical overdue Future Intent
+→ protected slots
 ```
+
+### 验收
+
+- 不再 all-fit → return all；
+- embedding 缺失的文字记忆仍可依靠 keyword 等通道召回；
+- 同 cluster 不大量霸占 prompt；
+- protected future memory 有数量上限；
+- token budget 遇到过长候选时继续尝试后续短候选；
+- legacy retrieval 可通过 feature flag 回退。
+
+### 产品门槛
+
+> **Commit 4 完成后即视为第一版可玩，不等待后续高级认知。**
+
+并立即进入 Sully 搬家线。
 
 ---
 
-## Commit 5 — Recall Stats & Stability
+## Commit 5 — Sully Full Backup Foundation
 
-修改：
+新增：
 
 ```text
-memory-storage.ts
-memory-service caller
+lib/migrations/sully-v3/types.ts
+parse-backup.ts
+validate-backup.ts
+asset-resolver.ts
+id-map.ts
+provenance.ts
+migration-journal.ts
+report.ts
+```
+
+### 目标
+
+- 正式识别 Sully full backup v3；
+- dry-run；
+- backup fingerprint；
+- 资源扫描；
+- ID map；
+- policy skip；
+- 幂等导入基础；
+- 不修改用户现有 Float 数据。
+
+### 验收
+
+给一份真实 v3 ZIP，可以输出完整迁移计划和计数，但尚不写入。
+
+---
+
+## Commit 6 — Sully Native Life Migration
+
+优先恢复最影响“搬过去就能继续生活”的数据：
+
+```text
+profile
+characters
+assets
+chat / rich messages
+moments / comments / likes
+diary
 ```
 
 ### 验收
 
-只有真正注入生成 Prompt 的记忆：
+- 原始时间尽量保留；
+- 富消息类型尽量映射；
+- 附件缺失不丢消息正文；
+- 朋友圈恢复帖子/评论/点赞；
+- 导入数据可重新进入 Float 原生时间线；
+- 同一备份重复导入不生成双份记录。
+
+---
+
+## Commit 7 — Sully Extended Life + Cognitive Migration
+
+继续迁：
+
+```text
+character extras / relationship state / behavior prefs
+world / worldbook
+story / chapters
+game records
+schedules / event boxes
+room notes / todos / life records
+VR 小说 / 批注 / 信件 / 剧本 / 演出正文
+guidebook / digest 等有价值内容
+Memory Palace
+windowsill → Future Intent
+Legacy daily/monthly memory
+Memory Links raw preservation
+```
+
+明确不迁：
+
+```text
+Pixel Home 状态
+房间 UI / 布局 / runtime state
+VR 特殊 runtime state
+hotNewsSnapshots
+```
+
+### 验收
+
+- Palace tags / mood / accessCount / room / timestamps 保留；
+- Windowsill 分类但不重写正文；
+- Sully embedding 不进入活动向量空间；
+- Float embedding 可重建，失败不丢文本；
+- Memory Links 即使 active graph 尚未完成，也必须完整保真保存；
+- 世界书等无法完全投影的字段保留原始 payload；
+- 迁移报告可说明原生恢复、archive、skip、失败数量。
+
+### 产品门槛
+
+> **Commit 7 完成后视为 Sully 搬家 MVP 完成，可以把 Sully 旧生活作为 Float 的历史起点继续正式玩。**
+
+---
+
+## Commit 8 — Recall Stats & Stability
+
+只有真正注入角色 Prompt 的记忆才：
 
 ```text
 accessCount +1
 lastAccessedAt 更新
+stability 递减式强化
 ```
 
-Debug preview 不增加。
+Debug preview / candidate generation 不计 recall。
 
 ---
 
-## Commit 6 — Core Memory Guardrails
+## Commit 9 — Future Intent Lifecycle
 
-修改：
-
-```text
-core-memory-builder.ts
-core prompt
-```
-
-### 验收
+实现：
 
 ```text
-明天看电影
+pending
+→ overdue / fulfilled / cancelled
+→ reschedule replacement
 ```
 
-不会进入 Core。
-
-完成后的重要共同经历可以进入正常 Core 候选。
+时间过去不能自动等同 fulfilled。
 
 ---
 
-## Commit 7 — Debug Instrumentation
+## Commit 10 — Core Memory Guardrails
+
+防止 pending / overdue / cancelled Future Intent 进入 Core。
+
+完成后的真实经历先形成 event / relationship，再由 Core builder 判断长期稳定性。
+
+---
+
+## Commit 11 — Debug Instrumentation
 
 增加：
 
 ```text
-retrieval reason
-candidate score
-selected/rejected reason
+query
+candidate source
+feature score
+future protection reason
+selected / rejected reason
 ```
 
-### 验收
+用于回答：
 
-出现异常召回时能回答：
-
-> “为什么它想起了这条？”
+> “为什么它想起了 / 没想起这条？”
 
 ---
 
-## Commit 8 — Sully Importer
+## Commit 12 — Memory Links & Spreading Activation
 
-先确认 Sully 实际 export schema，再写。
+增加 active `memory_links` store 与有限 spreading activation。
 
-### 验收
-
-- 节点数量核对；
-- tags 保留；
-- mood 保留；
-- accessCount 保留；
-- room 保留；
-- importance 转换；
-- old embedding 不混用；
-- 新 embedding 可重建；
-- Legacy 不造成重复。
-
----
-
-## Commit 9 — Memory Links
-
-增加 Memory Graph。
+Sully 迁移时已经保真的旧 link 在这里通过 ID map 激活。
 
 ### 验收
 
-A 被召回后可带出相关 B，
-
-但：
+A 被召回后可以把相关 B 带入候选池，但：
 
 ```text
-B 必须仍经过总 ranker
+B 仍必须经过总 ranker
 ```
 
-且 link expansion 不爆炸。
+且 expansion 有硬上限。
+
+---
+
+## Commit 13 — Migration Polish / Rollback UI
+
+最后再补：
+
+```text
+手机端选择 ZIP
+dry-run 可视化
+导入进度
+warning / missing assets
+retry
+rollback
+```
+
+不把漂亮 UI 作为 Commit 5～7 搬家 MVP 的前置条件。
 
 ---
 
@@ -3392,100 +3828,135 @@ later complex link classification
 
 # 74. 明确“不做”的事情
 
-第一阶段禁止：
+当前阶段禁止：
 
 1. **不要整套复制 Sully Memory Palace 代码。**
 2. **不要把 7 个房间做成 Float 运行前提。**
 3. **不要优先重做漂亮 UI。**
 4. **不要把 Future Intent 塞进 Core。**
 5. **不要把过期计划自动标记 fulfilled。**
-6. **不要复用 Sully embedding。**
+6. **不要复用 Sully embedding 作为 Float 活动向量。**
 7. **不要 candidate 一出现就 accessCount +1。**
 8. **不要让 accessCount 权重无限自增强。**
 9. **不要每次聊天再调用 LLM 来挑记忆。**
 10. **不要只改 retrieval，却继续把 80 events 压成唯一一条大摘要。**
-11. **不要 Phase 1 就上 Attic Rumination。**
-12. **不要 Phase 1 就建立复杂稠密 Memory Graph。**
-13. **不要因为 embedding 失败就丢失记忆正文。**
-14. **不要在没有真实 Sully export schema 前写死导入解析器。**
+11. **不要第一版就上 Attic Rumination。**
+12. **不要为了 Memory Graph 延迟 Sully 搬家；links 可以先保真保存，后激活。**
+13. **不要因为 embedding 或附件失败就丢失正文记录。**
+14. **不要把所有 Sully 数据压成 memory；能恢复原生 App 数据的必须优先恢复。**
+15. **不要迁 Pixel Home 状态。**
+16. **不要迁 Sully 房间 UI / 布局 / runtime state；但真实便签/待办/文本内容不能因此误删。**
+17. **不要迁 VR 特殊 runtime state；但 VR 内容本体必须迁。**
+18. **不要迁 hotNewsSnapshots / 热榜历史。**
+19. **不要默认复制 API Key / Token / 密码等 secret。**
+20. **不要用“不知道落哪里”为理由丢数据；除明确 policy skip 外，应原生投影或保真 archive。**
 
 ---
 
-# 75. Phase 1 完成定义
+# 75. Phase 1 —— Cognitive Memory MVP / 可玩门槛
 
-满足以下条件，才算第一阶段真正完成：
+Commit 1～4 完成即达到：
 
 ```text
 ✓ 老数据兼容
 ✓ 多 App Timeline 不受影响
 ✓ 80-event batch 可生成原子记忆
-✓ importance 动态生成
-✓ tags 第一类保存
-✓ kind 第一类保存
+✓ importance / tags / kind 第一类保存
 ✓ Future Intent 可即时产生
-✓ Future Intent 有时间生命周期
 ✓ all-fit 时仍进行认知筛选
 ✓ vector + keyword + time 混合召回
+✓ 临近计划可以 protected recall
+✓ API / embedding 故障有降级
+```
+
+达到这里：
+
+> **可以开始正式试玩，不需要等待 AccessCount、Lifecycle、Core Guardrails 或 Memory Graph。**
+
+---
+
+# 76. Phase 2 —— Sully Full Migration MVP / 搬家门槛
+
+Commit 5～7 完成即达到：
+
+```text
+✓ full v3 ZIP dry-run / validate
+✓ profile / characters
+✓ chat + rich messages
+✓ moments / comments / likes
+✓ diary
+✓ media assets
+✓ world / worldbook
+✓ story / game / schedules / event boxes
+✓ VR 内容本体
+✓ Memory Palace
+✓ windowsill → Future Intent
+✓ Legacy memory gap filling / archive
+✓ Memory Links 保真保存
+✓ embedding 重建
+✓ provenance / ID map / idempotency
+✓ migration report
+```
+
+同时确认以下四类不会迁入：
+
+```text
+✗ Pixel Home 状态
+✗ Sully 房间 UI / 布局 / runtime state
+✗ VR 特殊 runtime state
+✗ 热榜历史
+```
+
+达到这里：
+
+> **可以把 Sully 旧生活作为 Float 的历史起点，正式搬过去继续玩。**
+
+---
+
+# 77. Phase 3 —— 长期稳定性与认知完善
+
+Commit 8～12：
+
+```text
 ✓ 真正注入才增加 accessCount
-✓ Stability 有基础巩固
+✓ Stability 基础巩固
+✓ Future Intent fulfilled / cancelled / overdue / reschedule lifecycle
 ✓ Core 不吞临时计划
-✓ API 故障可降级
-✓ Debug 能解释召回原因
-```
-
----
-
-# 76. Phase 2 完成定义
-
-```text
-✓ 真正 BM25
-✓ 更稳定的 tag/entity extraction
-✓ 更合理 recency decay
-✓ stability 调参
-✓ future intent fulfil/cancel 自动检测
-✓ reschedule linking
-✓ memory cluster / diversity 更准确
-✓ Memory UI 展示认知字段
-```
-
----
-
-# 77. Phase 3 完成定义
-
-```text
+✓ Debug 能解释召回
 ✓ MemoryLink Store
-✓ temporal/person/topic/emotion links
 ✓ spreading activation
-✓ link pruning
-✓ Sully existing links migration
-✓ graph debug view
+✓ Sully preserved links 激活
 ```
+
+这些提高长期质量，但不是首次试玩和搬家的阻塞条件。
 
 ---
 
-# 78. Phase 4 可选高级认知
+# 78. Phase 4 —— 可选高级认知与迁移体验
 
-最后才评估：
+最后评估：
 
 ```text
+更复杂 memory clustering
 Room-specific weighting
 Attic / unresolved memories
 Rumination
 Mood-dependent resurfacing
 Advanced consolidation
-Metaphor links
+Metaphor link generation
 Self-model evolution
+Migration UI polish / rollback UX
 ```
 
 这些属于：
 
-> “让角色的脑子更像某一种人”
+> “让角色的脑子更像某一种人 / 让迁移体验更漂亮”
 
 而不是：
 
-> “让角色先能正确记住事情”。
+> “让角色先能正确记住事情并带着旧生活搬过去”。
 
-基础可靠性必须优先。
+基础可玩与数据完整性必须优先。
 
 ---
 
@@ -3522,45 +3993,61 @@ Memory Types & Backward Compatibility。
 
 # 80. 最推荐的实际开发顺序
 
-如果现在就开始动 Float，建议严格按：
+从当前 Commit 3 已完成的状态继续：
 
 ```text
-1. Types
+1. Types & Compatibility                  ✅
    ↓
-2. Atomic Extraction
+2. Atomic Extraction                      ✅
    ↓
-3. Future Intent Immediate Detector
+3. Future Intent Immediate Detector       ✅
    ↓
-4. Always-on Cognitive Retrieval
+4. Cognitive Retrieval v1
    ↓
-5. AccessCount + Stability
+   ───── 可玩门槛 ─────
    ↓
-6. Core Guardrails
+5. Sully Full Backup Foundation
    ↓
-7. Debug
+6. Sully Native Life Migration
    ↓
-8. Sully Import
+7. Sully Extended Life + Cognitive Migration
    ↓
-9. Memory Graph
+   ───── 搬家门槛 ─────
    ↓
-10. Advanced Sully cognition
+8. Recall Stats + Stability
+   ↓
+9. Future Intent Lifecycle
+   ↓
+10. Core Guardrails
+   ↓
+11. Debug
+   ↓
+12. Memory Links
+   ↓
+13. Migration UI / Rollback Polish
+   ↓
+14. Optional advanced cognition
 ```
 
-这里最重要的前三个体验跃迁点是：
+当前最重要的四个体验跃迁点：
 
 ```text
 Atomic Memory
 Future Intent
-Always-on Selection
+Always-on Cognitive Selection
+Full Life Migration
 ```
 
-因为它们分别解决：
+分别解决：
 
 ```text
 “记忆颗粒太粗”
 “答应过的未来事情记不住”
 “不是在想起，而是全塞进上下文”
+“换到 Float 后旧生活只剩几条总结”
 ```
+
+因此不要为了先完成高级 Memory Graph，而把搬家继续往后推。
 
 ---
 
@@ -3616,9 +4103,37 @@ Always-on Selection
                            ▼
               AccessCount / Stability
                            │
-                     Phase 3:
                     Memory Graph
 ```
+
+Sully 搬家从侧面接入，而不是绕过 Float 数据层：
+
+```text
+                 Sully Full Backup v3
+                          │
+          ┌───────────────┼────────────────┐
+          │               │                │
+          ▼               ▼                ▼
+   Native Projection  Cognitive      Compatibility
+          │           Projection       Preservation
+          │               │                │
+          ▼               ▼                ▼
+     Float Apps       Memory DB      Non-native data
+          │               │                │
+          └───────┬───────┘                │
+                  ▼                        │
+          Unified Native Timeline          │
+                  +                        │
+          Cognitive Retrieval              │
+                                           │
+Explicit policy skip:                      │
+Pixel Home / room runtime /                │
+VR runtime / hot-news history ─────────────┘ (discard by policy)
+```
+
+关键约束：
+
+> **迁移器不能成为另一套平行“旧 Sully 数据库”。能恢复成 Float 原生生活数据的必须进入 Float 原生数据层；Compatibility Archive 只承接当前确实没有合适原生模型、且又不属于明确排除项的有价值内容。**
 
 ---
 
@@ -3648,4 +4163,4 @@ Always-on Selection
 → 后续通过 Memory Graph 形成联想
 ```
 
-这条路线既保留 Float 原有的跨 App 生活史优势，也能逐步吸收 Sully 最有价值的“思考方式”，而不需要先把整个系统重写成记忆宫殿。
+这条路线既保留 Float 原有的跨 App 生活史优势，也能逐步吸收 Sully 最有价值的“思考方式”；同时在 Cognitive Retrieval MVP 完成后优先恢复 Sully 的真实生活数据，而不是等所有高级认知功能完成才允许搬家。
