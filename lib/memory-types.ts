@@ -171,6 +171,7 @@ export const DEFAULT_SUMMARIZATION_PROMPT = `你是一个记忆整理助手。�
 - 每条记忆包含 2-6 个短标签，并动态判断 importance
 - kind 只能是 event、relationship、user_fact、self_fact、knowledge、future_intent
 - future_intent 必须附带 futureIntent，分类为 plan、promise、goal、wish 或 expectation
+- 如果能准确对应事件，只把事件文本中的 [event_ref=...] 填入 sourceEventRefs，不要编造引用
 - 最多输出 8 条；没有值得长期保存的内容时输出空数组
 - 严格只输出 JSON，不要 Markdown、标题或解释文字
 
@@ -221,6 +222,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
     coreMemoryPrompt: DEFAULT_CORE_MEMORY_PROMPT,
     vnSummaryPrompt: "",
     atomicMemoryExtractionEnabled: true,
+    futureIntentEnabled: true,
     shortTermAllowedSources: {
         chat: true,
         group_chat: true,

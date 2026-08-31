@@ -215,6 +215,9 @@ export function incrementEventCounter(characterId: string): number {
     const next = getEventCounter(characterId) + 1;
     if (typeof window !== "undefined") {
         kvSet(EVENT_COUNTER_PREFIX + characterId, String(next));
+        void import("./future-intent-detector")
+            .then(({ maybeRunFutureIntentDetection }) => maybeRunFutureIntentDetection(characterId))
+            .catch(error => console.warn("[FutureIntent] Immediate detection failed:", error));
     }
     return next;
 }
