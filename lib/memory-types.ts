@@ -2,6 +2,70 @@
 
 import type { ContentAppId } from "./settings-types";
 
+export type MemoryKind =
+    | "event"
+    | "relationship"
+    | "user_fact"
+    | "self_fact"
+    | "knowledge"
+    | "future_intent";
+
+export type MemoryMood =
+    | "neutral"
+    | "happy"
+    | "tender"
+    | "excited"
+    | "sad"
+    | "angry"
+    | "anxious"
+    | "afraid"
+    | "jealous"
+    | "embarrassed"
+    | "lonely"
+    | "nostalgic";
+
+export type FutureIntentType =
+    | "plan"
+    | "promise"
+    | "goal"
+    | "wish"
+    | "expectation";
+
+export type FutureIntentStatus =
+    | "pending"
+    | "overdue"
+    | "fulfilled"
+    | "cancelled";
+
+export type TimePrecision =
+    | "exact"
+    | "day"
+    | "range"
+    | "vague"
+    | "unknown";
+
+export interface FutureIntentMeta {
+    type: FutureIntentType;
+    status: FutureIntentStatus;
+    targetAt?: string;
+    targetEndAt?: string;
+    timezone?: string;
+    timePrecision?: TimePrecision;
+    originalTimeExpression?: string;
+    fulfilledAt?: string;
+    cancelledAt?: string;
+    replacedByMemoryId?: string;
+}
+
+export type CognitiveRoom =
+    | "living_room"
+    | "bedroom"
+    | "study"
+    | "user_room"
+    | "self_room"
+    | "attic"
+    | "windowsill";
+
 export type MemoryEntry = {
     id: string;
     characterId: string;
@@ -13,6 +77,17 @@ export type MemoryEntry = {
     createdAt: string;
     updatedAt: string;
     sourceMessageIds?: string[];
+
+    // Cognitive Memory Layer fields remain optional for old records.
+    tags?: string[];
+    mood?: MemoryMood;
+    kind?: MemoryKind;
+    accessCount?: number;
+    lastAccessedAt?: string;
+    stability?: number;
+    futureIntent?: FutureIntentMeta;
+    cognitiveRoom?: CognitiveRoom;
+
     metadata?: Record<string, unknown>;
 };
 
@@ -29,6 +104,13 @@ export type MemoryConfig = {
     summarizationPrompt: string;            // user-editable prompt template for memory summarization
     coreMemoryPrompt: string;               // user-editable prompt template for core-memory extraction
     vnSummaryPrompt: string;                // user-editable prompt for VN chapter summarization
+    // Cognitive Memory Layer feature flags are optional for old saved configs.
+    cognitiveMemoryEnabled?: boolean;
+    atomicMemoryExtractionEnabled?: boolean;
+    futureIntentEnabled?: boolean;
+    hybridRecallEnabled?: boolean;
+    memoryStabilityEnabled?: boolean;
+    memoryLinksEnabled?: boolean;
     shortTermAllowedSources?: {
         chat?: boolean;
         group_chat?: boolean;

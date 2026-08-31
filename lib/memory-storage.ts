@@ -5,6 +5,7 @@ import type { MemoryEntry, MemoryConfig } from "./memory-types";
 import { DEFAULT_MEMORY_CONFIG } from "./memory-types";
 import { kvGet, kvSet, registerKvMigration, registerDynamicPrefix } from "./kv-db";
 import { openIndexedDbAtLeast } from "./idb-open";
+import { normalizeMemoryEntry } from "./memory-compat";
 
 // ── Long-term memory DB (unchanged from v1) ──
 
@@ -84,6 +85,7 @@ export async function loadMemoryEntries(characterId: string): Promise<MemoryEntr
             const allEntries: MemoryEntry[] = await runRequest(tx.objectStore(STORE_NAME).getAll());
             entries = allEntries.filter(entry => entry.characterId === characterId);
         }
+        entries = entries.map(normalizeMemoryEntry);
         entries.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
         return entries;
     } finally {
