@@ -21,6 +21,7 @@ import type { DiaryEntry, DiaryEntryBlock } from "./diary-entry-types";
 import { loadNoteWallProjectionEntries } from "./notewall-memory";
 import { loadXiaohongshuProjectionEntries } from "./xiaohongshu-memory";
 import { formatXiaohongshuShareForPrompt } from "./chat-share";
+import { formatMemoryExtractionTimelineEntry } from "./memory-provenance";
 import { loadBlackMarketTheaterProjectionEntries } from "./black-market-storage";
 import { loadInterviewMagazineProjectionEntries } from "./interview-magazine-memory";
 import { loadCoCreateProjectionEntries } from "./cocreate-memory";
@@ -1423,11 +1424,14 @@ export function formatTimelineForSummarization(
 
     const timeAware = resolvePromptTimeAware(options?.timeAware);
     const eventsText = entries
-        .map(e => `- ${timeAware ? e.content : formatStoredPromptEventContent(e.content, {
-            label: "事件",
-            timestamp: e.timestamp,
-            timeAware,
-        })}`)
+        .map(e => {
+            const formattedContent = timeAware ? e.content : formatStoredPromptEventContent(e.content, {
+                label: "事件",
+                timestamp: e.timestamp,
+                timeAware,
+            });
+            return `- ${formatMemoryExtractionTimelineEntry(e, formattedContent)}`;
+        })
         .join("\n");
     return {
         eventsText,

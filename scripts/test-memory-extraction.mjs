@@ -26,6 +26,33 @@ async function loadTypeScriptModule(relativePath) {
 
 const extraction = await loadTypeScriptModule("lib/memory-extraction.ts");
 const dedupe = await loadTypeScriptModule("lib/memory-dedupe.ts");
+const provenance = await loadTypeScriptModule("lib/memory-provenance.ts");
+
+const timelineEntries = [
+    {
+        id: "chat_1",
+        sourceApp: "chat",
+        timestamp: "2026-08-31T22:00:00.000Z",
+        content: "用户说今晚想看电影。",
+    },
+    {
+        id: "xhs_1",
+        sourceApp: "xiaohongshu",
+        timestamp: "2026-08-31T22:10:00.000Z",
+        content: "角色发布了旅行笔记。",
+    },
+];
+const formattedEvent = provenance.formatMemoryExtractionTimelineEntry(timelineEntries[1], timelineEntries[1].content);
+assert.match(formattedEvent, /^\[event_ref=xhs_1\]/);
+assert.match(formattedEvent, /\[source_app=xiaohongshu\]/);
+assert.match(formattedEvent, /\[event_time=2026-08-31T22:10:00\.000Z\]/);
+assert.equal(provenance.resolveMemorySourceApp(["xhs_1"], timelineEntries, "chat"), "xiaohongshu");
+assert.equal(provenance.resolveMemorySourceApp(undefined, timelineEntries, "chat"), "chat");
+assert.equal(provenance.resolveMemorySourceApp(["unknown"], timelineEntries, "chat"), "chat");
+
+const memoryTypes = await loadTypeScriptModule("lib/memory-types.ts");
+assert.notEqual(memoryTypes.DEFAULT_SUMMARIZATION_PROMPT, memoryTypes.LEGACY_SUMMARIZATION_PROMPT);
+assert.match(memoryTypes.DEFAULT_SUMMARIZATION_PROMPT, /sourceEventRefs/);
 
 const structured = extraction.extractMemoriesFromModelOutput(JSON.stringify({
     memories: [
@@ -35,6 +62,7 @@ const structured = extraction.extractMemoriesFromModelOutput(JSON.stringify({
             importance: 0.86,
             mood: "tender",
             kind: "future_intent",
+            sourceEventRefs: ["xhs_1"],
             futureIntent: {
                 type: "plan",
                 status: "pending",
@@ -54,6 +82,7 @@ assert.equal(structured.memories.length, 2);
 assert.equal(structured.memories[0].importance, 0.86);
 assert.equal(structured.memories[0].kind, "future_intent");
 assert.equal(structured.memories[0].futureIntent?.type, "plan");
+assert.deepEqual(structured.memories[0].sourceEventRefs, ["xhs_1"]);
 assert.deepEqual(structured.memories[1].tags, ["用户偏好", "作品"]);
 
 const repaired = extraction.extractMemoriesFromModelOutput(

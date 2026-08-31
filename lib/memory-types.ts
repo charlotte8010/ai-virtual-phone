@@ -175,7 +175,7 @@ export const DEFAULT_SUMMARIZATION_PROMPT = `你是一个记忆整理助手。�
 - 严格只输出 JSON，不要 Markdown、标题或解释文字
 
 输出格式：
-{"memories":[{"content":"...","tags":["..."],"importance":0.8,"kind":"event"}]}`;
+{"memories":[{"content":"...","tags":["..."],"importance":0.8,"kind":"event","sourceEventRefs":["event_ref_if_known"]}]}`;
 
 /**
  * Default core-memory summarization prompt template.

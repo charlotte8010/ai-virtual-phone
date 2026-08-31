@@ -29,6 +29,7 @@ import { simpleLLMCall } from "./api-helpers";
 import { maybeRunCoreMemoryPipeline } from "./core-memory-builder";
 import { extractMemoriesFromModelOutput, type ExtractedMemoryCandidate } from "./memory-extraction";
 import { buildSourceEventSignature, findDuplicateMemory } from "./memory-dedupe";
+import { resolveMemorySourceApp } from "./memory-provenance";
 
 /** Per-character lock to prevent concurrent summarization. */
 const summarizingSet = new Set<string>();
@@ -50,7 +51,9 @@ async function finalizeSummarization(
     }
 
     if (newMemoryCount > 0) {
-        incrementCoreMemoryCounter(characterId);
+        for (let index = 0; index < newMemoryCount; index += 1) {
+            incrementCoreMemoryCounter(characterId);
+        }
         await maybeRunCoreMemoryPipeline(characterId, characterName);
     }
 }
@@ -60,9 +63,10 @@ function getSourceEventSignatures(
     candidate: ExtractedMemoryCandidate,
     allEntries: NativeTimelineEntry[],
 ): string[] {
-    if (!candidate.sourceEventRefs?.length) return [];
+    const sourceEventRefs = getValidSourceEventRefs(candidate, allEntries);
+    if (!sourceEventRefs.length) return [];
     const entriesById = new Map(allEntries.map(entry => [entry.id, entry]));
-    return candidate.sourceEventRefs
+    return sourceEventRefs
         .map(ref => entriesById.get(ref))
         .filter((entry): entry is NativeTimelineEntry => Boolean(entry))
         .map(entry => buildSourceEventSignature(
@@ -78,11 +82,21 @@ function getSourceEventTimestamps(
     candidate: ExtractedMemoryCandidate,
     allEntries: NativeTimelineEntry[],
 ): string[] {
-    if (!candidate.sourceEventRefs?.length) return [];
+    const sourceEventRefs = getValidSourceEventRefs(candidate, allEntries);
+    if (!sourceEventRefs.length) return [];
     const entriesById = new Map(allEntries.map(entry => [entry.id, entry]));
-    return candidate.sourceEventRefs
+    return sourceEventRefs
         .map(ref => entriesById.get(ref)?.timestamp)
         .filter((timestamp): timestamp is string => Boolean(timestamp));
+}
+
+function getValidSourceEventRefs(
+    candidate: ExtractedMemoryCandidate,
+    allEntries: NativeTimelineEntry[],
+): string[] {
+    if (!candidate.sourceEventRefs?.length) return [];
+    const validRefs = new Set(allEntries.map(entry => entry.id));
+    return candidate.sourceEventRefs.filter(ref => validRefs.has(ref));
 }
 
 function buildAtomicMemoryEntry(
@@ -96,12 +110,17 @@ function buildAtomicMemoryEntry(
     index: number,
 ): MemoryEntry {
     const now = new Date().toISOString();
+    const sourceEventRefs = getValidSourceEventRefs(candidate, allEntries);
     const sourceEventSignatures = getSourceEventSignatures(characterId, candidate, allEntries);
     const sourceEventTimestamps = getSourceEventTimestamps(candidate, allEntries);
     return {
         id: `mem_lt_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 8)}`,
         characterId,
-        sourceApp: dominantSource as MemoryEntry["sourceApp"],
+        sourceApp: resolveMemorySourceApp(
+            candidate.sourceEventRefs,
+            allEntries,
+            dominantSource,
+        ) as MemoryEntry["sourceApp"],
         type: "long_term",
         content: candidate.content,
         importance: candidate.importance,
@@ -111,7 +130,7 @@ function buildAtomicMemoryEntry(
         ...(candidate.mood ? { mood: candidate.mood } : {}),
         kind: candidate.kind,
         ...(candidate.futureIntent ? { futureIntent: { ...candidate.futureIntent } } : {}),
-        ...(candidate.sourceEventRefs ? { sourceMessageIds: [...candidate.sourceEventRefs] } : {}),
+        ...(sourceEventRefs.length > 0 ? { sourceMessageIds: sourceEventRefs } : {}),
         metadata: {
             summarizedEvents: allEntries.length,
             timeSpan: `${earliest} ~ ${latest}`,
@@ -196,11 +215,13 @@ export async function runSummarizationPipeline(
     // Use user-editable prompt template from config, with placeholder substitution
     const atomicExtractionEnabled = config.atomicMemoryExtractionEnabled !== false;
     const configuredPrompt = config.summarizationPrompt?.trim();
-    const promptTemplate = !atomicExtractionEnabled && (
-        !configuredPrompt || configuredPrompt === DEFAULT_SUMMARIZATION_PROMPT
-    )
-        ? LEGACY_SUMMARIZATION_PROMPT
-        : configuredPrompt || DEFAULT_SUMMARIZATION_PROMPT;
+    const promptTemplate = atomicExtractionEnabled
+        ? (!configuredPrompt || configuredPrompt === LEGACY_SUMMARIZATION_PROMPT
+            ? DEFAULT_SUMMARIZATION_PROMPT
+            : configuredPrompt)
+        : (!configuredPrompt || configuredPrompt === DEFAULT_SUMMARIZATION_PROMPT
+            ? LEGACY_SUMMARIZATION_PROMPT
+            : configuredPrompt);
     const summaryPrompt = promptTemplate
         .replace(/\{\{char\}\}/gi, characterName)
         .replace(/\{\{earliest\}\}/gi, earliest)
@@ -208,7 +229,7 @@ export async function runSummarizationPipeline(
         .replace(/\{\{events\}\}/gi, eventsText);
 
     const extractionPrompt = atomicExtractionEnabled
-        ? `${summaryPrompt}\n\n请严格只输出 JSON，不要输出 Markdown 或解释文字。JSON 顶层必须是 {"memories":[]}。每条记忆必须包含 content、tags、importance、kind；只保存具有持续价值的信息，把互不相关的事件拆开，不要虚构，最多输出 8 条；没有值得长期保存的内容时输出 {"memories":[]}。importance 必须是 0 到 1 的数字，kind 只能是 event、relationship、user_fact、self_fact、knowledge、future_intent；kind 为 future_intent 时附带 futureIntent，其中 type 只能是 plan、promise、goal、wish、expectation，status 只能是 pending、overdue、fulfilled、cancelled，timePrecision 只能是 exact、day、range、vague、unknown。`
+        ? `${summaryPrompt}\n\n请严格只输出 JSON，不要输出 Markdown 或解释文字。JSON 顶层必须是 {"memories":[]}。每条记忆必须包含 content、tags、importance、kind；只保存具有持续价值的信息，把互不相关的事件拆开，不要虚构，最多输出 8 条；没有值得长期保存的内容时输出 {"memories":[]}。importance 必须是 0 到 1 的数字，kind 只能是 event、relationship、user_fact、self_fact、knowledge、future_intent；kind 为 future_intent 时附带 futureIntent，其中 type 只能是 plan、promise、goal、wish、expectation，status 只能是 pending、overdue、fulfilled、cancelled，timePrecision 只能是 exact、day、range、vague、unknown。事件文本中的 [event_ref=...] 是稳定来源引用；如果能准确对应事件，只把现有引用填写到 sourceEventRefs，不要编造引用。`
         : summaryPrompt;
 
     // Call LLM for summarization — compatible with all providers
