@@ -212,27 +212,13 @@ export function getEventCounter(characterId: string): number {
     return val ? parseInt(val, 10) || 0 : 0;
 }
 
-export function incrementEventCounter(characterId: string, event?: FutureIntentEvent): number {
+export function incrementEventCounter(characterId: string, event: FutureIntentEvent): number {
     const next = getEventCounter(characterId) + 1;
     if (typeof window !== "undefined") {
         kvSet(EVENT_COUNTER_PREFIX + characterId, String(next));
         void (async () => {
             const { maybeRunFutureIntentDetection } = await import("./future-intent-detector");
-            if (event) {
-                await maybeRunFutureIntentDetection(characterId, event);
-                return;
-            }
-
-            // Legacy callers have not all been migrated to pass the write result yet.
-            // Capture the snapshot here, then pass that concrete event into the queue;
-            // the detector itself never reloads the timeline to guess "latest".
-            const timeline = await import("./short-term-assembler");
-            const entries = timeline.filterTimelineByAllowedSources(
-                timeline.loadNativeTimeline(characterId),
-                loadMemoryConfig().shortTermAllowedSources,
-            );
-            const latest = entries[entries.length - 1];
-            if (latest) await maybeRunFutureIntentDetection(characterId, latest);
+            await maybeRunFutureIntentDetection(characterId, event);
         })()
             .catch(error => console.warn("[FutureIntent] Immediate detection failed:", error));
     }

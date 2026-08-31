@@ -707,12 +707,15 @@ export function InterviewMagazineApp({ onClose }: Props) {
         timestamp: now,
       });
       for (const guest of result.context.guests) {
-        incrementEventCounter(guest.character.id, projectionEntry ? {
-          id: projectionEntry.id,
-          sourceApp: "interview_magazine",
-          timestamp: projectionEntry.timestamp,
-          content: projectionEntry.content,
-        } : undefined);
+        if (projectionEntry) {
+          incrementEventCounter(guest.character.id, {
+            id: projectionEntry.id,
+            sourceApp: "interview_magazine",
+            sourceDetail: "interview_issue",
+            timestamp: projectionEntry.timestamp,
+            content: projectionEntry.content,
+          });
+        }
         maybeRunSummarization(guest.character.id, guest.character.name).catch((summarizeError) => {
           console.warn("[InterviewMagazine] Summarization check failed:", summarizeError);
         });

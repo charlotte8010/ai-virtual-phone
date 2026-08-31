@@ -26,6 +26,8 @@ async function loadTypeScriptModule(relativePath) {
 
 const detector = await loadTypeScriptModule("lib/future-intent-detector.ts");
 const memoryTypes = await loadTypeScriptModule("lib/memory-types.ts");
+const sourcePolicy = await loadTypeScriptModule("lib/memory-source-policy.ts");
+const chatMemoryEvent = await loadTypeScriptModule("lib/chat-memory-event.ts");
 
 assert.equal(memoryTypes.DEFAULT_MEMORY_CONFIG.futureIntentEnabled, true);
 assert.equal(detector.hasFutureIntentSignal("明晚八点一起看电影"), true);
@@ -34,6 +36,27 @@ assert.equal(detector.hasFutureIntentSignal("明早八点叫我"), true);
 assert.equal(detector.hasFutureIntentSignal("今晚提醒我"), true);
 assert.equal(detector.hasFutureIntentSignal("刚才一起看了电影"), false);
 assert.equal(detector.hasFutureIntentSignal("明天的天气不错"), false);
+
+const persistedAssistant = {
+    id: "chat_assistant_new",
+    sessionId: "session_1",
+    role: "assistant",
+    content: "明早八点我叫你。",
+    createdAt: "2026-08-31T15:00:00.000Z",
+};
+assert.deepEqual(chatMemoryEvent.toFutureIntentEvent(persistedAssistant), {
+    id: persistedAssistant.id,
+    sourceApp: "chat",
+    sourceDetail: "direct",
+    timestamp: persistedAssistant.createdAt,
+    content: persistedAssistant.content,
+    sessionId: persistedAssistant.sessionId,
+});
+
+assert.equal(sourcePolicy.isMemorySourceAllowed("xiaohongshu", undefined, { xiaohongshu: false }), false);
+assert.equal(sourcePolicy.isMemorySourceAllowed("xiaohongshu", undefined, { xiaohongshu: true }), true);
+assert.equal(sourcePolicy.isMemorySourceAllowed("chat", "group", { group_chat: false }), false);
+assert.equal(sourcePolicy.isMemorySourceAllowed("chat", "direct", { chat: false }), false);
 
 const event = {
     id: "chat_future_1",
@@ -49,6 +72,12 @@ const prompt = detector.buildFutureIntentPrompt(event, timeContext);
 assert.match(prompt, /\[event_ref=chat_future_1\]/);
 assert.match(prompt, /Asia\/Shanghai/);
 assert.match(prompt, /memories/);
+const eventTimeContext = detector.resolveFutureIntentTimeContext(
+    event,
+    "Asia/Shanghai",
+    new Date("2030-01-01T00:00:00.000Z"),
+);
+assert.equal(eventTimeContext.now.toISOString(), event.timestamp);
 
 const vagueInput = {
     content: "以后想和你去北海道",
@@ -102,6 +131,18 @@ const normalizedInvalidRange = detector.normalizeFutureIntentCandidate({
 }, timeContext);
 assert.equal(normalizedInvalidRange?.futureIntent?.timePrecision, "unknown");
 assert.equal(normalizedInvalidRange?.futureIntent?.targetAt, undefined);
+assert.equal(normalizedInvalidRange?.futureIntent?.targetEndAt, undefined);
+const normalizedMissingRangeStart = detector.normalizeFutureIntentCandidate({
+    ...vagueInput,
+    futureIntent: {
+        type: "plan",
+        timePrecision: "range",
+        targetEndAt: "2026-09-05T20:00:00+08:00",
+    },
+}, timeContext);
+assert.equal(normalizedMissingRangeStart?.futureIntent?.timePrecision, "unknown");
+assert.equal(normalizedMissingRangeStart?.futureIntent?.targetAt, undefined);
+assert.equal(normalizedMissingRangeStart?.futureIntent?.targetEndAt, undefined);
 assert.equal(detector.normalizeFutureIntentCandidate({ ...vagueInput, kind: "event" }, timeContext), null);
 
 const parsed = detector.parseFutureIntentModelOutput(JSON.stringify({
@@ -147,11 +188,58 @@ const enrichedEntry = detector.buildFutureIntentMemoryEntry("char_1", {
         targetAt: "2026-09-05T20:00:00+08:00",
     },
 }, new Date("2026-09-01T14:01:00.000Z"));
-assert.equal(detector.isFutureIntentDuplicate(enrichedEntry, entry), true);
-const merged = detector.mergeFutureIntentMemory(entry, enrichedEntry);
-assert.equal(merged.content, enrichedEntry.content);
-assert.equal(merged.futureIntent?.targetAt, "2026-09-05T20:00:00+08:00");
-assert.deepEqual(merged.sourceMessageIds, [event.id, "chat_future_2"]);
+assert.equal(detector.isFutureIntentDuplicate(enrichedEntry, entry), false);
+const sameTimeEntry = detector.buildFutureIntentMemoryEntry("char_1", {
+    ...event,
+    id: "chat_future_same_time",
+    content: "明晚八点和你看一部电影",
+}, {
+    ...parsed[0],
+    content: "用户和角色明晚八点一起看电影。",
+}, new Date("2026-08-31T14:01:00.000Z"));
+assert.equal(detector.isFutureIntentDuplicate(sameTimeEntry, entry), true);
+const merged = detector.mergeFutureIntentMemory(entry, sameTimeEntry);
+assert.equal(merged.content, entry.content);
+assert.equal(merged.futureIntent?.targetAt, "2026-09-01T20:00:00+08:00");
+assert.deepEqual(merged.sourceMessageIds, [event.id, "chat_future_same_time"]);
+const dayEntry = detector.buildFutureIntentMemoryEntry("char_1", {
+    ...event,
+    id: "chat_future_day",
+}, {
+    ...parsed[0],
+    futureIntent: {
+        ...parsed[0].futureIntent,
+        timePrecision: "day",
+        targetAt: "2026-09-03T00:00:00+08:00",
+    },
+}, new Date("2026-08-31T14:01:00.000Z"));
+const sameDayEntry = {
+    ...dayEntry,
+    id: "existing_same_day",
+    futureIntent: { ...dayEntry.futureIntent, targetAt: "2026-09-03T20:00:00+08:00" },
+    metadata: { ...dayEntry.metadata, sourceEventSignatures: ["char_1:chat:existing_same_day"] },
+};
+const differentDayEntry = {
+    ...dayEntry,
+    id: "existing_different_day",
+    futureIntent: { ...dayEntry.futureIntent, targetAt: "2026-09-04T20:00:00+08:00" },
+    metadata: { ...dayEntry.metadata, sourceEventSignatures: ["char_1:chat:existing_different_day"] },
+};
+assert.equal(detector.isFutureIntentDuplicate(dayEntry, sameDayEntry), true);
+assert.equal(detector.isFutureIntentDuplicate(dayEntry, differentDayEntry), false);
+const rangeEntry = detector.buildFutureIntentMemoryEntry("char_1", {
+    ...event,
+    id: "chat_future_range",
+}, {
+    ...parsed[0],
+    futureIntent: {
+        ...parsed[0].futureIntent,
+        timePrecision: "range",
+        targetAt: "2026-09-02T00:00:00+08:00",
+        targetEndAt: "2026-09-04T00:00:00+08:00",
+    },
+}, new Date("2026-08-31T14:01:00.000Z"));
+assert.equal(detector.isFutureIntentDuplicate(rangeEntry, dayEntry), true);
 const fulfilledCandidate = detector.buildFutureIntentMemoryEntry("char_1", {
     ...event,
     id: "chat_future_3",

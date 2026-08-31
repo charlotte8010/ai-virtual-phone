@@ -1058,12 +1058,14 @@ async function triggerCharacterReply(
         dispatchMomentsUpdated();
 
         // Increment event counter for auto-summarization
-        incrementEventCounter(characterId, lastCreatedComment ? {
-            id: lastCreatedComment.id,
-            sourceApp: "moments",
-            timestamp: lastCreatedComment.createdAt,
-            content: lastCreatedComment.content,
-        } : undefined);
+        if (lastCreatedComment) {
+            incrementEventCounter(characterId, {
+                id: lastCreatedComment.id,
+                sourceApp: "moments",
+                timestamp: lastCreatedComment.createdAt,
+                content: lastCreatedComment.content,
+            });
+        }
         maybeRunSummarization(characterId, character.name)
             .catch(err => console.warn("[Moments] Summarization check failed:", err));
     }

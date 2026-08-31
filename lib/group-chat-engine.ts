@@ -267,13 +267,15 @@ function scheduleGroupMemorySummarization(
         const recentMessages = history.slice(-totalNewEvents);
         for (let i = 0; i < totalNewEvents; i++) {
             const message = recentMessages[i];
-            incrementEventCounter(characterId, message ? {
+            if (!message) continue;
+            incrementEventCounter(characterId, {
                 id: message.id,
                 sourceApp: "chat",
+                sourceDetail: "group",
                 timestamp: message.createdAt,
                 content: message.content,
                 sessionId: message.sessionId,
-            } : undefined);
+            });
         }
 
         maybeRunSummarization(characterId, character.name)

@@ -656,13 +656,15 @@ export function StoryApp({ onClose }: StoryAppProps) {
             const recentMessages = loadStoryMessages(sessionId).slice(-2);
             for (let index = 0; index < 2; index += 1) {
               const message = recentMessages[index];
-              incrementEventCounter(characterId, message ? {
+              if (!message) continue;
+              incrementEventCounter(characterId, {
                 id: message.id,
                 sourceApp: "story",
+                sourceDetail: "story",
                 timestamp: message.createdAt,
                 content: message.renderedContent || message.rawContent,
                 sessionId,
-              } : undefined);
+              });
             }
             await maybeRunSummarization(characterId, storyCharacter.name);
           } catch (err) {

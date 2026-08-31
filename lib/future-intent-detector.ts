@@ -1,10 +1,12 @@
 import { jsonrepair } from "jsonrepair";
 import type { ExtractedMemoryCandidate } from "./memory-extraction";
 import type { FutureIntentMeta, MemoryEntry } from "./memory-types";
+import type { ContentAppId } from "./settings-types";
 
 export type FutureIntentEvent = {
     id: string;
-    sourceApp: string;
+    sourceApp: ContentAppId;
+    sourceDetail?: string;
     timestamp: string;
     content: string;
     sessionId?: string;
@@ -14,6 +16,18 @@ export type MemoryTimeContext = {
     now: Date;
     timezone?: string;
 };
+
+export function resolveFutureIntentTimeContext(
+    event: FutureIntentEvent,
+    timezone?: string,
+    fallbackNow = new Date(),
+): MemoryTimeContext {
+    const eventTime = new Date(event.timestamp);
+    return {
+        now: Number.isFinite(eventTime.getTime()) ? eventTime : fallbackNow,
+        timezone,
+    };
+}
 
 export type FutureIntentDetectionResult = {
     status: "disabled" | "skipped" | "no_candidate" | "saved" | "duplicate" | "updated";
@@ -36,7 +50,7 @@ const PRECISION_RANK: Record<string, number> = {
     day: 3,
     exact: 4,
 };
-const FUTURE_INTENT_TIME_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const EXACT_TIME_TOLERANCE_MS = 5 * 60 * 1000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -113,9 +127,6 @@ function sanitizeFutureIntent(value: unknown): FutureIntentMeta {
         targetEndAt: trimString(raw.targetEndAt, 100),
         timezone: trimString(raw.timezone, 80),
         originalTimeExpression: trimString(raw.originalTimeExpression, 200),
-        fulfilledAt: trimString(raw.fulfilledAt, 100),
-        cancelledAt: trimString(raw.cancelledAt, 100),
-        replacedByMemoryId: trimString(raw.replacedByMemoryId, 100),
     };
 }
 
@@ -143,7 +154,7 @@ export function buildFutureIntentPrompt(
         "originalTimeExpression 保留事件中的原始时间表达。",
         "只输出 JSON，不要 Markdown 或解释文字。",
         "事件：",
-        `<native_event>[event_ref=${event.id}] [source_app=${event.sourceApp}] [event_time=${event.timestamp}] ${event.content}</native_event>`,
+        `<native_event>[event_ref=${event.id}] [source_app=${event.sourceApp}] [source_detail=${event.sourceDetail || ""}] [event_time=${event.timestamp}] ${event.content}</native_event>`,
         "输出格式：{\"memories\":[{\"content\":\"...\",\"tags\":[\"...\"],\"importance\":0.8,\"kind\":\"future_intent\",\"sourceEventRefs\":[\"事件中的 event_ref\"],\"futureIntent\":{\"type\":\"plan\",\"status\":\"pending\",\"timePrecision\":\"exact\",\"targetAt\":\"...\"}}]}",
     ].join("\n");
 }
@@ -174,8 +185,10 @@ export function normalizeFutureIntentCandidate(
         && targetEndAt
         && Date.parse(targetEndAt) < Date.parse(targetAt),
     );
+    const requiresTargetAt = ["exact", "day", "range"].includes(precision);
+    const invalidTemporalData = invalidRange || (requiresTargetAt && !targetAt);
     const normalizedPrecision = ["exact", "day", "range"].includes(precision)
-        && (!targetAt || invalidRange)
+        && invalidTemporalData
         ? "unknown"
         : precision;
     const timezone = isValidTimeZone(rawFutureIntent.timezone)
@@ -185,8 +198,8 @@ export function normalizeFutureIntentCandidate(
         type: rawFutureIntent.type,
         status: rawFutureIntent.status,
         timePrecision: normalizedPrecision as NonNullable<FutureIntentMeta["timePrecision"]>,
-        ...(!invalidRange && targetAt ? { targetAt } : {}),
-        ...(!invalidRange && targetEndAt ? { targetEndAt } : {}),
+        ...(!invalidTemporalData && targetAt ? { targetAt } : {}),
+        ...(!invalidTemporalData && targetEndAt ? { targetEndAt } : {}),
         ...(timezone ? { timezone } : {}),
         ...(rawFutureIntent.originalTimeExpression
             ? { originalTimeExpression: rawFutureIntent.originalTimeExpression }
@@ -297,23 +310,73 @@ function futureIntentTypesMatch(left: FutureIntentMeta, right: FutureIntentMeta)
         && (right.type === "plan" || right.type === "promise");
 }
 
+function calendarDayKey(value: string, timezone?: string): string | undefined {
+    const timestamp = Date.parse(value);
+    if (!Number.isFinite(timestamp)) return undefined;
+    if (!timezone) {
+        return /^\d{4}-\d{2}-\d{2}/u.exec(value)?.[0]
+            || new Date(timestamp).toISOString().slice(0, 10);
+    }
+    try {
+        const parts = new Intl.DateTimeFormat("en-US", {
+            timeZone: timezone,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+        }).formatToParts(new Date(timestamp));
+        const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+        return `${values.year}-${values.month}-${values.day}`;
+    } catch {
+        return new Date(timestamp).toISOString().slice(0, 10);
+    }
+}
+
+function temporalRange(intent: FutureIntentMeta): { start: number; end: number } | undefined {
+    const start = intent.targetAt ? Date.parse(intent.targetAt) : NaN;
+    if (!Number.isFinite(start)) return undefined;
+    const end = intent.targetEndAt ? Date.parse(intent.targetEndAt) : start;
+    if (!Number.isFinite(end) || end < start) return undefined;
+    return { start, end };
+}
+
 function futureIntentTimesMatch(left: FutureIntentMeta, right: FutureIntentMeta): boolean {
-    const leftStart = left.targetAt ? Date.parse(left.targetAt) : NaN;
-    const rightStart = right.targetAt ? Date.parse(right.targetAt) : NaN;
-    if (Number.isFinite(leftStart) && Number.isFinite(rightStart)) {
-        const leftEnd = left.targetEndAt ? Date.parse(left.targetEndAt) : leftStart;
-        const rightEnd = right.targetEndAt ? Date.parse(right.targetEndAt) : rightStart;
-        return leftStart <= rightEnd + FUTURE_INTENT_TIME_WINDOW_MS
-            && rightStart <= leftEnd + FUTURE_INTENT_TIME_WINDOW_MS;
+    const leftPrecision = left.timePrecision || "unknown";
+    const rightPrecision = right.timePrecision || "unknown";
+    const leftRange = temporalRange(left);
+    const rightRange = temporalRange(right);
+
+    if (leftPrecision === "vague" || leftPrecision === "unknown"
+        || rightPrecision === "vague" || rightPrecision === "unknown") {
+        return Boolean(
+            left.originalTimeExpression
+            && right.originalTimeExpression
+            && left.originalTimeExpression === right.originalTimeExpression,
+        );
     }
-    if (left.originalTimeExpression && right.originalTimeExpression) {
-        return left.originalTimeExpression === right.originalTimeExpression;
+    if (!leftRange || !rightRange) return false;
+
+    if (leftPrecision === "exact" && rightPrecision === "exact") {
+        return Math.abs(leftRange.start - rightRange.start) <= EXACT_TIME_TOLERANCE_MS;
     }
-    return left.timePrecision === right.timePrecision
-        || left.timePrecision === "vague"
-        || right.timePrecision === "vague"
-        || left.timePrecision === "unknown"
-        || right.timePrecision === "unknown";
+    if (leftPrecision === "day" && rightPrecision === "day") {
+        return calendarDayKey(left.targetAt || "", left.timezone)
+            === calendarDayKey(right.targetAt || "", right.timezone);
+    }
+    if (leftPrecision === "day" || rightPrecision === "day") {
+        const dayIntent = leftPrecision === "day" ? left : right;
+        const other = leftPrecision === "day" ? rightRange : leftRange;
+        const day = calendarDayKey(dayIntent.targetAt || "", dayIntent.timezone);
+        if (!day) return false;
+        const otherStartDay = calendarDayKey(new Date(other.start).toISOString(), dayIntent.timezone);
+        const otherEndDay = calendarDayKey(new Date(other.end).toISOString(), dayIntent.timezone);
+        return Boolean(
+            otherStartDay
+            && otherEndDay
+            && otherStartDay <= day
+            && day <= otherEndDay,
+        );
+    }
+    return leftRange.start <= rightRange.end && rightRange.start <= leftRange.end;
 }
 
 export function isFutureIntentDuplicate(candidate: MemoryEntry, existing: MemoryEntry): boolean {
@@ -350,7 +413,7 @@ export function buildFutureIntentMemoryEntry(
     return {
         id: `mem_lt_future_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         characterId,
-        sourceApp: event.sourceApp as MemoryEntry["sourceApp"],
+        sourceApp: event.sourceApp,
         type: "long_term",
         content: candidate.content,
         importance: clamp(candidate.importance, 0, 1),
@@ -532,16 +595,21 @@ async function runFutureIntentDetection(
 ): Promise<FutureIntentDetectionResult> {
     if (typeof window === "undefined") return { status: "skipped", reason: "browser_only" };
 
-    const [memoryStorage, settingsStorage, characterStorage, apiHelpers, memoryEmbedding, memoryExtraction] = await Promise.all([
+    const [memoryStorage, settingsStorage, characterStorage, apiHelpers, memoryEmbedding, memoryExtraction, sourcePolicy] = await Promise.all([
         import("./memory-storage"),
         import("./settings-storage"),
         import("./character-storage"),
         import("./api-helpers"),
         import("./memory-embedding"),
         import("./memory-extraction"),
+        import("./memory-source-policy"),
     ]);
     const config = memoryStorage.loadMemoryConfig();
     if (config.futureIntentEnabled === false) return { status: "disabled" };
+
+    if (!sourcePolicy.isMemorySourceAllowed(event.sourceApp, event.sourceDetail, config.shortTermAllowedSources)) {
+        return { status: "skipped", reason: "source_disabled" };
+    }
 
     if (!hasFutureIntentSignal(event.content)) {
         return { status: "skipped", reason: "heuristic_miss" };
@@ -551,10 +619,7 @@ async function runFutureIntentDetection(
     if (!apiConfig) return { status: "skipped", reason: "missing_memory_summary_api" };
 
     const character = characterStorage.loadCharacters().find(item => item.id === characterId);
-    const timeContext: MemoryTimeContext = {
-        now: new Date(),
-        timezone: character?.timeZone,
-    };
+    const timeContext = resolveFutureIntentTimeContext(event, character?.timeZone);
     const result = await apiHelpers.simpleLLMCall(
         apiConfig,
         [{ role: "user", content: buildFutureIntentPrompt(event, timeContext) }],

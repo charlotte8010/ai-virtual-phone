@@ -31,6 +31,7 @@ import { loadChatOfflineProjectionEntries } from "./chat-offline-storage";
 import { loadCheckPhoneProjectionEntries } from "./checkphone-storage";
 import { formatShoppingPaymentRequestHistory } from "./shopping-payment-request";
 import { loadCustomAppTimelineEntries } from "./custom-app-storage";
+import { isMemorySourceAllowed } from "./memory-source-policy";
 import {
     canCharacterSeeMomentPost,
     getVisibleMomentCommentsForCharacter,
@@ -895,17 +896,7 @@ export function filterTimelineByAllowedSources(
     allowed?: MemoryConfig["shortTermAllowedSources"],
 ): NativeTimelineEntry[] {
     const rules = allowed ?? loadMemoryConfig().shortTermAllowedSources ?? {};
-    return entries.filter(entry => {
-        const source = entry.sourceApp;
-        if (source === "chat") {
-            if (entry.sourceDetail === "group") return rules.group_chat !== false;
-            return rules.chat !== false;
-        }
-        if (source === "story") return rules.story !== false;
-        if (source === "vn") return rules.vn !== false;
-        if (source === "map") return rules.adventure !== false;
-        return (rules as Record<string, boolean | undefined>)[source] !== false;
-    });
+    return entries.filter(entry => isMemorySourceAllowed(entry.sourceApp, entry.sourceDetail, rules));
 }
 
 /**

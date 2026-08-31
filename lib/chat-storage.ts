@@ -13,6 +13,8 @@ import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { emitChatPluginEvent, runChatPluginTransformSync } from "./chat-plugin-hooks";
 import { parseAIResponse } from "./rich-message-parser";
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
+import { incrementEventCounter } from "./memory-storage";
+import { toFutureIntentEvent } from "./chat-memory-event";
 
 export const DEFAULT_VISION_IMAGE_PROMPT_LIMIT = 1;
 export const MAX_VISION_IMAGE_PROMPT_LIMIT = 20;
@@ -1163,6 +1165,18 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
         }
         sessions[sessIdx].updatedAt = newMsg.createdAt;
         saveChatSessions(sessions);
+    }
+
+    const persistedSession = sessions[sessIdx];
+    if (persistedSession && !persistedSession.isGroup
+        && (newMsg.role === "user" || newMsg.role === "assistant")) {
+        incrementEventCounter(persistedSession.contactId, toFutureIntentEvent(newMsg));
+        if (newMsg.role === "assistant" && typeof window !== "undefined") {
+            const characterName = loadCharacters().find(item => item.id === persistedSession.contactId)?.name || "角色";
+            void import("./memory-summarizer")
+                .then(({ maybeRunSummarization }) => maybeRunSummarization(persistedSession.contactId, characterName))
+                .catch(error => console.warn("[ChatStorage] Memory summarization check failed:", error));
+        }
     }
 
     if (typeof window !== "undefined") {
