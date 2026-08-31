@@ -3,7 +3,7 @@
 // Trigger: every N events (configurable). Short-term events are NOT deleted after summarization.
 
 import type { MemoryEntry } from "./memory-types";
-import { DEFAULT_SUMMARIZATION_PROMPT } from "./memory-types";
+import { DEFAULT_SUMMARIZATION_PROMPT, LEGACY_SUMMARIZATION_PROMPT } from "./memory-types";
 import {
     loadMemoryConfig,
     loadMemoryEntries,
@@ -74,6 +74,17 @@ function getSourceEventSignatures(
         ));
 }
 
+function getSourceEventTimestamps(
+    candidate: ExtractedMemoryCandidate,
+    allEntries: NativeTimelineEntry[],
+): string[] {
+    if (!candidate.sourceEventRefs?.length) return [];
+    const entriesById = new Map(allEntries.map(entry => [entry.id, entry]));
+    return candidate.sourceEventRefs
+        .map(ref => entriesById.get(ref)?.timestamp)
+        .filter((timestamp): timestamp is string => Boolean(timestamp));
+}
+
 function buildAtomicMemoryEntry(
     characterId: string,
     dominantSource: string,
@@ -86,6 +97,7 @@ function buildAtomicMemoryEntry(
 ): MemoryEntry {
     const now = new Date().toISOString();
     const sourceEventSignatures = getSourceEventSignatures(characterId, candidate, allEntries);
+    const sourceEventTimestamps = getSourceEventTimestamps(candidate, allEntries);
     return {
         id: `mem_lt_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 8)}`,
         characterId,
@@ -107,6 +119,7 @@ function buildAtomicMemoryEntry(
             extractionVersion: "atomic-v1",
             extractionMode: "periodic",
             ...(sourceEventSignatures.length > 0 ? { sourceEventSignatures } : {}),
+            ...(sourceEventTimestamps.length > 0 ? { sourceEventTimestamps } : {}),
         },
     };
 }
@@ -181,14 +194,19 @@ export async function runSummarizationPipeline(
     const { eventsText, earliest, latest } = formatted;
 
     // Use user-editable prompt template from config, with placeholder substitution
-    const promptTemplate = config.summarizationPrompt?.trim() || DEFAULT_SUMMARIZATION_PROMPT;
+    const atomicExtractionEnabled = config.atomicMemoryExtractionEnabled !== false;
+    const configuredPrompt = config.summarizationPrompt?.trim();
+    const promptTemplate = !atomicExtractionEnabled && (
+        !configuredPrompt || configuredPrompt === DEFAULT_SUMMARIZATION_PROMPT
+    )
+        ? LEGACY_SUMMARIZATION_PROMPT
+        : configuredPrompt || DEFAULT_SUMMARIZATION_PROMPT;
     const summaryPrompt = promptTemplate
         .replace(/\{\{char\}\}/gi, characterName)
         .replace(/\{\{earliest\}\}/gi, earliest)
         .replace(/\{\{latest\}\}/gi, latest)
         .replace(/\{\{events\}\}/gi, eventsText);
 
-    const atomicExtractionEnabled = config.atomicMemoryExtractionEnabled !== false;
     const extractionPrompt = atomicExtractionEnabled
         ? `${summaryPrompt}\n\n请严格只输出 JSON，不要输出 Markdown 或解释文字。JSON 顶层必须是 {"memories":[]}。每条记忆必须包含 content、tags、importance、kind；只保存具有持续价值的信息，把互不相关的事件拆开，不要虚构，最多输出 8 条；没有值得长期保存的内容时输出 {"memories":[]}。importance 必须是 0 到 1 的数字，kind 只能是 event、relationship、user_fact、self_fact、knowledge、future_intent；kind 为 future_intent 时附带 futureIntent，其中 type 只能是 plan、promise、goal、wish、expectation，status 只能是 pending、overdue、fulfilled、cancelled，timePrecision 只能是 exact、day、range、vague、unknown。`
         : summaryPrompt;
@@ -263,6 +281,12 @@ export async function runSummarizationPipeline(
     }
 
     const extraction = extractMemoriesFromModelOutput(summary);
+    if (extraction.mode === "invalid_structured") {
+        return {
+            success: false,
+            error: "结构化记忆结果没有有效条目，已取消入库，请稍后重试",
+        };
+    }
     const embeddingApiConfig = config.vectorRecallEnabled
         ? resolveAuxiliaryApiConfig("embeddingApiConfigId")
         : null;

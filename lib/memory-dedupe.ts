@@ -44,11 +44,23 @@ function cosineSimilarity(left: number[], right: number[]): number | undefined {
     return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm));
 }
 
-function areTimestampsClose(left: string, right: string): boolean {
-    const leftTime = Date.parse(left);
-    const rightTime = Date.parse(right);
-    if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return false;
-    return Math.abs(leftTime - rightTime) <= SEMANTIC_TIME_WINDOW_MS;
+function getSourceTimestamps(entry: MemoryDedupeCandidate): string[] {
+    const timestamps = entry.metadata?.sourceEventTimestamps;
+    if (!Array.isArray(timestamps)) return [];
+    return timestamps.filter((value): value is string => typeof value === "string" && value.length > 0);
+}
+
+function areSourceTimestampsClose(left: MemoryDedupeCandidate, right: MemoryDedupeCandidate): boolean {
+    const leftTimes = getSourceTimestamps(left);
+    const rightTimes = getSourceTimestamps(right);
+    if (leftTimes.length === 0 || rightTimes.length === 0) return false;
+    return leftTimes.some(leftTimestamp => rightTimes.some(rightTimestamp => {
+        const leftTime = Date.parse(leftTimestamp);
+        const rightTime = Date.parse(rightTimestamp);
+        return Number.isFinite(leftTime)
+            && Number.isFinite(rightTime)
+            && Math.abs(leftTime - rightTime) <= SEMANTIC_TIME_WINDOW_MS;
+    }));
 }
 
 function sharesSourceSignature(
@@ -77,7 +89,7 @@ export function findDuplicateMemory(
             candidateKind === existingKind
             && candidate.embedding
             && existing.embedding
-            && areTimestampsClose(candidate.createdAt, existing.createdAt)
+            && areSourceTimestampsClose(candidate, existing)
         ) {
             const similarity = cosineSimilarity(candidate.embedding, existing.embedding);
             if (similarity !== undefined && similarity > SEMANTIC_DUPLICATE_THRESHOLD) return existing;

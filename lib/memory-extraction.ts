@@ -20,7 +20,8 @@ export interface ExtractedMemoryCandidate {
 
 export interface MemoryExtractionResult {
     memories: ExtractedMemoryCandidate[];
-    mode: "structured" | "plain_text_fallback";
+    mode: "structured" | "plain_text_fallback" | "invalid_structured";
+    invalidCount?: number;
 }
 
 const MAX_MEMORIES_PER_BATCH = 8;
@@ -214,6 +215,12 @@ function parseStructuredPayload(text: string): unknown | undefined {
     return undefined;
 }
 
+function looksLikeStructuredOutput(text: string): boolean {
+    const trimmed = text.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) return true;
+    return extractCodeBlocks(text).some(block => block.startsWith("{") || block.startsWith("["));
+}
+
 function getRawMemories(payload: unknown): unknown[] | undefined {
     if (Array.isArray(payload)) return payload;
     if (isRecord(payload) && Array.isArray(payload.memories)) return payload.memories;
@@ -221,8 +228,10 @@ function getRawMemories(payload: unknown): unknown[] | undefined {
 }
 
 function buildPlainTextFallback(text: string): ExtractedMemoryCandidate[] {
+    const codeBlocks = extractCodeBlocks(text);
+    const fallbackText = codeBlocks.length === 1 ? codeBlocks[0] : text;
     const candidate = sanitizeExtractedMemory({
-        content: text,
+        content: fallbackText,
         tags: [],
         importance: 0.8,
         kind: "event",
@@ -235,13 +244,24 @@ export function extractMemoriesFromModelOutput(text: string): MemoryExtractionRe
     const payload = parseStructuredPayload(output);
     const rawMemories = getRawMemories(payload);
     if (rawMemories) {
+        const memories = rawMemories
+            .map(sanitizeExtractedMemory)
+            .filter((memory): memory is ExtractedMemoryCandidate => memory !== null)
+            .slice(0, MAX_MEMORIES_PER_BATCH);
+        if (rawMemories.length > 0 && memories.length === 0) {
+            return {
+                memories: [],
+                mode: "invalid_structured",
+                invalidCount: rawMemories.length,
+            };
+        }
         return {
-            memories: rawMemories
-                .map(sanitizeExtractedMemory)
-                .filter((memory): memory is ExtractedMemoryCandidate => memory !== null)
-                .slice(0, MAX_MEMORIES_PER_BATCH),
+            memories,
             mode: "structured",
         };
+    }
+    if (looksLikeStructuredOutput(output)) {
+        return { memories: [], mode: "invalid_structured", invalidCount: 1 };
     }
     return {
         memories: buildPlainTextFallback(output),

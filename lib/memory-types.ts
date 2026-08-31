@@ -133,11 +133,30 @@ export type MemorySearchResult = {
     score: number;
 };
 
+/** Legacy plain-text summarization prompt kept for feature-flag rollback. */
+export const LEGACY_SUMMARIZATION_PROMPT = `你是一个记忆整理助手。根据以下事件记录，创建一段简洁的事实性总结。
+
+角色：{{char}}
+时间跨度：{{earliest}} 至 {{latest}}
+
+事件记录：
+{{events}}
+
+要求：
+- 用第三人称描述{{char}}和用户之间的互动
+- 保留关键事实：提到的名字、做出的承诺、情感变化、关系里程碑
+- 保留用户分享的具体信息（生日、偏好、习惯）
+- 保留朋友圈等非聊天事件中的关键信息
+- 100-200字
+- 不要包含格式标记
+
+总结：`;
+
 /**
- * Default summarization prompt template.
+ * Default structured summarization prompt template.
  * Placeholders: {{char}}, {{earliest}}, {{latest}}, {{events}}
  */
-export const DEFAULT_SUMMARIZATION_PROMPT = `你是一个记忆整理助手。根据以下事件记录，创建一段简洁的事实性总结。
+export const DEFAULT_SUMMARIZATION_PROMPT = `你是一个记忆整理助手。根据以下事件记录，创建一段结构化的原子长期记忆。
 
 角色：{{char}}
 时间跨度：{{earliest}} 至 {{latest}}

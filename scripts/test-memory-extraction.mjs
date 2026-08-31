@@ -95,6 +95,13 @@ const empty = extraction.extractMemoriesFromModelOutput('{"memories":[]}');
 assert.equal(empty.mode, "structured");
 assert.deepEqual(empty.memories, []);
 
+const invalidStructured = extraction.extractMemoriesFromModelOutput('{"memories":[{"kind":"event"}]}');
+assert.equal(invalidStructured.mode, "invalid_structured");
+assert.equal(invalidStructured.memories.length, 0);
+
+const malformedStructured = extraction.extractMemoriesFromModelOutput("```json\n{ memories: [{ kind: 'event' }\n```");
+assert.equal(malformedStructured.mode, "invalid_structured");
+
 const capped = extraction.extractMemoriesFromModelOutput(JSON.stringify({
     memories: Array.from({ length: 10 }, (_, index) => ({
         content: `长期记忆 ${index}`,
@@ -138,9 +145,23 @@ assert.equal(dedupe.findDuplicateMemory({
     content: "语义相近但措辞不同",
     embedding: [1, 0],
     createdAt: "2026-08-02T00:00:00.000Z",
+    metadata: { sourceEventTimestamps: ["2026-08-02T00:00:00.000Z"] },
 }, [{
     ...existing,
     embedding: [0.99, 0.1],
+    metadata: { sourceEventTimestamps: ["2026-08-02T00:00:00.000Z"] },
 }])?.id, "mem-1");
+assert.equal(dedupe.findDuplicateMemory({
+    ...existing,
+    id: "semantic-different-time",
+    content: "语义相近但发生在另一个时间",
+    embedding: [1, 0],
+    createdAt: "2026-08-20T00:00:00.000Z",
+    metadata: { sourceEventTimestamps: ["2026-08-20T00:00:00.000Z"] },
+}, [{
+    ...existing,
+    embedding: [0.99, 0.1],
+    metadata: { sourceEventTimestamps: ["2026-08-02T00:00:00.000Z"] },
+}]), null);
 
 console.log("memory extraction and dedupe tests passed");
