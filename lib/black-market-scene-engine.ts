@@ -252,7 +252,13 @@ export async function summarizeAndRecordBlackMarketScene(sessionId: string): Pro
   });
 
   try {
-    incrementEventCounter(finalSession.characterId);
+    incrementEventCounter(finalSession.characterId, {
+      id: `black_market_${sessionId}`,
+      sourceApp: "story",
+      timestamp,
+      content: summary,
+      sessionId,
+    });
     maybeRunSummarization(finalSession.characterId, finalSession.characterName)
       .catch(err => console.warn("[BlackMarketScene] Summarization check failed:", err));
   } catch (err) {

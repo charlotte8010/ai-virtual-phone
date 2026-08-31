@@ -102,11 +102,12 @@ function saveEvents(characterId: string, events: XiaohongshuProjectionEntry[]): 
   saveEventsByKey(storageKey(characterId), events);
 }
 
-function upsertEvent(characterId: string, entry: XiaohongshuProjectionEntry): void {
+function upsertEvent(characterId: string, entry: XiaohongshuProjectionEntry): XiaohongshuProjectionEntry {
   const events = loadEvents(characterId);
   const next = events.filter(item => item.id !== entry.id);
   next.push(entry);
   saveEvents(characterId, next);
+  return entry;
 }
 
 function noteTitle(note: XiaohongshuNote): string {
@@ -127,7 +128,7 @@ function belongsToNote(entry: XiaohongshuProjectionEntry, noteId: string): boole
     || entry.content.includes(`noteId:${noteId}`);
 }
 
-export function recordXiaohongshuPostEvent(input: RecordXiaohongshuPostEventInput): void {
+export function recordXiaohongshuPostEvent(input: RecordXiaohongshuPostEventInput): XiaohongshuProjectionEntry {
   const timestamp = input.note.createdAt || new Date().toISOString();
   const time = formatChatTimestamp(timestamp);
   const characterName = cleanEventText(input.characterName, 80) || "角色";
@@ -135,7 +136,7 @@ export function recordXiaohongshuPostEvent(input: RecordXiaohongshuPostEventInpu
   const body = cleanEventText(input.note.body, 500);
   const image = imageText(input.note);
 
-  upsertEvent(input.characterId, {
+  return upsertEvent(input.characterId, {
     id: `xiaohongshu_post_${input.note.id}`,
     noteId: input.note.id,
     timestamp,
@@ -143,8 +144,8 @@ export function recordXiaohongshuPostEvent(input: RecordXiaohongshuPostEventInpu
   });
 }
 
-export function recordXiaohongshuCommentEvent(input: RecordXiaohongshuCommentEventInput): void {
-  if (!input.comment.text.trim()) return;
+export function recordXiaohongshuCommentEvent(input: RecordXiaohongshuCommentEventInput): XiaohongshuProjectionEntry | null {
+  if (!input.comment.text.trim()) return null;
   const timestamp = input.comment.createdAt || new Date().toISOString();
   const time = formatChatTimestamp(timestamp);
   const characterName = cleanEventText(input.characterName, 80) || "角色";
@@ -152,7 +153,7 @@ export function recordXiaohongshuCommentEvent(input: RecordXiaohongshuCommentEve
   const title = noteTitle(input.note);
   const body = cleanEventText(input.comment.text, 360);
 
-  upsertEvent(input.characterId, {
+  return upsertEvent(input.characterId, {
     id: `xiaohongshu_comment_${input.comment.id}`,
     noteId: input.note.id,
     commentId: input.comment.id,
@@ -161,8 +162,8 @@ export function recordXiaohongshuCommentEvent(input: RecordXiaohongshuCommentEve
   });
 }
 
-export function recordXiaohongshuReplyEvent(input: RecordXiaohongshuReplyEventInput): void {
-  if (!input.comment.text.trim()) return;
+export function recordXiaohongshuReplyEvent(input: RecordXiaohongshuReplyEventInput): XiaohongshuProjectionEntry | null {
+  if (!input.comment.text.trim()) return null;
   const timestamp = input.comment.createdAt || new Date().toISOString();
   const time = formatChatTimestamp(timestamp);
   const characterName = cleanEventText(input.characterName, 80) || "角色";
@@ -173,7 +174,7 @@ export function recordXiaohongshuReplyEvent(input: RecordXiaohongshuReplyEventIn
   const targetBody = cleanEventText(input.targetComment?.text, 360);
   const body = cleanEventText(input.comment.text, 360);
 
-  upsertEvent(input.characterId, {
+  return upsertEvent(input.characterId, {
     id: `xiaohongshu_reply_${input.comment.id}`,
     noteId: input.note.id,
     commentId: input.comment.id,
@@ -182,13 +183,13 @@ export function recordXiaohongshuReplyEvent(input: RecordXiaohongshuReplyEventIn
   });
 }
 
-export function recordXiaohongshuFollowUserEvent(input: RecordXiaohongshuFollowUserEventInput): void {
+export function recordXiaohongshuFollowUserEvent(input: RecordXiaohongshuFollowUserEventInput): XiaohongshuProjectionEntry {
   const timestamp = input.timestamp || new Date().toISOString();
   const time = formatChatTimestamp(timestamp);
   const characterName = cleanEventText(input.characterName, 80) || "角色";
   const userDisplayName = cleanEventText(input.userDisplayName, 80) || "小红书用户";
 
-  upsertEvent(input.characterId, {
+  return upsertEvent(input.characterId, {
     id: "xiaohongshu_follow_user",
     timestamp,
     content: `[小红书 ${time}] ${characterName}关注了“${userDisplayName}”（用户的小红书账号）。`,

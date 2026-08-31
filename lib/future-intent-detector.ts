@@ -21,14 +21,13 @@ export type FutureIntentDetectionResult = {
     reason?: string;
 };
 
-const FUTURE_TIME_PATTERN = /今天(?:晚上|晚|下午|傍晚|夜里)?|明(?:天|早|晚)|后天|这周|本周|周[一二三四五六日天]|周末|下周|月底|下个月|生日|纪念日|以后|到时候/u;
-const FUTURE_INTENT_ACTION_PATTERN = /记得|别忘了|约好|答应|说好了|一起|计划|准备|想|希望|想要|一定会|陪|承诺|安排|约|见面|吃饭|看电影/u;
+const FUTURE_TIME_PATTERN = /今天(?:晚上|晚|下午|傍晚|夜里)?|今晚|明(?:天|早|晚)|后天|这周|本周|周[一二三四五六日天]|周末|下周|月底|下个月|生日|纪念日|以后|到时候/u;
+const FUTURE_INTENT_ACTION_PATTERN = /记得|别忘了|约好|答应|说好了|一起|计划|准备|想|希望|想要|一定会|陪|承诺|安排|约|见面|吃饭|看电影|叫我|叫你|提醒我|提醒|通知我|通知|到点/u;
 const MEMORY_MOODS = new Set([
     "neutral", "happy", "tender", "excited", "sad", "angry", "anxious",
     "afraid", "jealous", "embarrassed", "lonely", "nostalgic",
 ]);
 const FUTURE_INTENT_TYPES = new Set(["plan", "promise", "goal", "wish", "expectation"]);
-const FUTURE_INTENT_STATUSES = new Set(["pending", "overdue", "fulfilled", "cancelled"]);
 const TIME_PRECISIONS = new Set(["exact", "day", "range", "vague", "unknown"]);
 const PRECISION_RANK: Record<string, number> = {
     unknown: 0,
@@ -100,9 +99,9 @@ function sanitizeFutureIntent(value: unknown): FutureIntentMeta {
     const type = typeof raw.type === "string" && FUTURE_INTENT_TYPES.has(raw.type)
         ? raw.type as FutureIntentMeta["type"]
         : "expectation";
-    const status = typeof raw.status === "string" && FUTURE_INTENT_STATUSES.has(raw.status)
-        ? raw.status as FutureIntentMeta["status"]
-        : "pending";
+    // Immediate extraction is a creation path. Lifecycle transitions are owned by
+    // the future-intent updater, never by a one-shot model response.
+    const status: FutureIntentMeta["status"] = "pending";
     const timePrecision = typeof raw.timePrecision === "string" && TIME_PRECISIONS.has(raw.timePrecision)
         ? raw.timePrecision as NonNullable<FutureIntentMeta["timePrecision"]>
         : "unknown";
@@ -170,24 +169,27 @@ export function normalizeFutureIntentCandidate(
     const targetEndAt = precision === "vague" || precision === "unknown"
         ? undefined
         : (isValidDateString(rawFutureIntent.targetEndAt) ? rawFutureIntent.targetEndAt : undefined);
-    const validRange = !targetAt || !targetEndAt || Date.parse(targetEndAt) >= Date.parse(targetAt);
+    const invalidRange = Boolean(
+        targetAt
+        && targetEndAt
+        && Date.parse(targetEndAt) < Date.parse(targetAt),
+    );
+    const normalizedPrecision = ["exact", "day", "range"].includes(precision)
+        && (!targetAt || invalidRange)
+        ? "unknown"
+        : precision;
     const timezone = isValidTimeZone(rawFutureIntent.timezone)
         ? rawFutureIntent.timezone
         : (isValidTimeZone(timeContext.timezone) ? timeContext.timezone : undefined);
     const futureIntent: FutureIntentMeta = {
         type: rawFutureIntent.type,
         status: rawFutureIntent.status,
-        timePrecision: precision,
-        ...(validRange && targetAt ? { targetAt } : {}),
-        ...(validRange && targetEndAt ? { targetEndAt } : {}),
+        timePrecision: normalizedPrecision as NonNullable<FutureIntentMeta["timePrecision"]>,
+        ...(!invalidRange && targetAt ? { targetAt } : {}),
+        ...(!invalidRange && targetEndAt ? { targetEndAt } : {}),
         ...(timezone ? { timezone } : {}),
         ...(rawFutureIntent.originalTimeExpression
             ? { originalTimeExpression: rawFutureIntent.originalTimeExpression }
-            : {}),
-        ...(rawFutureIntent.fulfilledAt ? { fulfilledAt: rawFutureIntent.fulfilledAt } : {}),
-        ...(rawFutureIntent.cancelledAt ? { cancelledAt: rawFutureIntent.cancelledAt } : {}),
-        ...(rawFutureIntent.replacedByMemoryId
-            ? { replacedByMemoryId: rawFutureIntent.replacedByMemoryId }
             : {}),
     };
 
@@ -357,7 +359,7 @@ export function buildFutureIntentMemoryEntry(
         tags: [...candidate.tags],
         ...(candidate.mood ? { mood: candidate.mood } : {}),
         kind: "future_intent",
-        futureIntent: candidate.futureIntent ? { ...candidate.futureIntent } : {
+        futureIntent: candidate.futureIntent ? { ...candidate.futureIntent, status: "pending" } : {
             type: "expectation",
             status: "pending",
             timePrecision: "unknown",
@@ -385,7 +387,8 @@ export function mergeFutureIntentMemory(existing: MemoryEntry, candidate: Memory
     const mergedIntent = {
         ...(useCandidateDetails ? existingIntent : candidateIntent),
         ...(useCandidateDetails ? candidateIntent : existingIntent),
-        status: existingIntent.status === "pending" ? candidateIntent.status : existingIntent.status,
+        // A merge may enrich content/time, but it must not advance the lifecycle.
+        status: existingIntent.status,
     };
     const existingMetadata = existing.metadata ?? {};
     const candidateMetadata = candidate.metadata ?? {};
@@ -416,28 +419,121 @@ export function mergeFutureIntentMemory(existing: MemoryEntry, candidate: Memory
     };
 }
 
-const detectorInFlight = new Map<string, Promise<FutureIntentDetectionResult>>();
-const lastScannedEventIds = new Map<string, string>();
-
-/** Run the immediate path once for the newest native event of a character. */
-export function maybeRunFutureIntentDetection(
+export type FutureIntentDetectionQueueRunner = (
     characterId: string,
-): Promise<FutureIntentDetectionResult> {
-    const inFlight = detectorInFlight.get(characterId);
-    if (inFlight) return inFlight;
-    const task = runFutureIntentDetection(characterId).finally(() => {
-        detectorInFlight.delete(characterId);
-    });
-    detectorInFlight.set(characterId, task);
-    return task;
+    event: FutureIntentEvent,
+) => Promise<FutureIntentDetectionResult>;
+
+export type FutureIntentDetectionQueue = {
+    enqueue: (characterId: string, event: FutureIntentEvent) => Promise<FutureIntentDetectionResult>;
+};
+
+type DetectionQueueItem = {
+    event: FutureIntentEvent;
+    resolve: (result: FutureIntentDetectionResult) => void;
+    reject: (error: unknown) => void;
+};
+
+type DetectionQueueState = {
+    pending: DetectionQueueItem[];
+    pendingByEventId: Map<string, Promise<FutureIntentDetectionResult>>;
+    processedEventIds: Set<string>;
+    processedOrder: string[];
+    running: boolean;
+};
+
+const MAX_PROCESSED_EVENT_IDS = 256;
+
+/** Per-character FIFO queue; events are passed in, so a worker never guesses from "latest". */
+export function createFutureIntentDetectionQueue(
+    runner: FutureIntentDetectionQueueRunner,
+): FutureIntentDetectionQueue {
+    const states = new Map<string, DetectionQueueState>();
+
+    const getState = (characterId: string): DetectionQueueState => {
+        const existing = states.get(characterId);
+        if (existing) return existing;
+        const created: DetectionQueueState = {
+            pending: [],
+            pendingByEventId: new Map(),
+            processedEventIds: new Set(),
+            processedOrder: [],
+            running: false,
+        };
+        states.set(characterId, created);
+        return created;
+    };
+
+    const rememberProcessed = (state: DetectionQueueState, eventId: string): void => {
+        if (state.processedEventIds.has(eventId)) return;
+        state.processedEventIds.add(eventId);
+        state.processedOrder.push(eventId);
+        if (state.processedOrder.length > MAX_PROCESSED_EVENT_IDS) {
+            const oldest = state.processedOrder.shift();
+            if (oldest) state.processedEventIds.delete(oldest);
+        }
+    };
+
+    const drain = async (characterId: string, state: DetectionQueueState): Promise<void> => {
+        if (state.running) return;
+        state.running = true;
+        try {
+            while (state.pending.length > 0) {
+                const item = state.pending.shift();
+                if (!item) continue;
+                try {
+                    const result = await runner(characterId, item.event);
+                    rememberProcessed(state, item.event.id);
+                    item.resolve(result);
+                } catch (error) {
+                    item.reject(error);
+                } finally {
+                    state.pendingByEventId.delete(item.event.id);
+                }
+            }
+        } finally {
+            state.running = false;
+            if (state.pending.length > 0) void drain(characterId, state);
+        }
+    };
+
+    return {
+        enqueue(characterId, event) {
+            const state = getState(characterId);
+            const pending = state.pendingByEventId.get(event.id);
+            if (pending) return pending;
+            if (state.processedEventIds.has(event.id)) {
+                return Promise.resolve({ status: "skipped", reason: "event_already_scanned" });
+            }
+
+            const promise = new Promise<FutureIntentDetectionResult>((resolve, reject) => {
+                state.pending.push({ event, resolve, reject });
+            });
+            state.pendingByEventId.set(event.id, promise);
+            void drain(characterId, state);
+            return promise;
+        },
+    };
 }
 
-async function runFutureIntentDetection(characterId: string): Promise<FutureIntentDetectionResult> {
+const detectionQueue = createFutureIntentDetectionQueue(runFutureIntentDetection);
+
+/** Queue the exact native event that triggered the counter. */
+export function maybeRunFutureIntentDetection(
+    characterId: string,
+    event: FutureIntentEvent,
+): Promise<FutureIntentDetectionResult> {
+    return detectionQueue.enqueue(characterId, event);
+}
+
+async function runFutureIntentDetection(
+    characterId: string,
+    event: FutureIntentEvent,
+): Promise<FutureIntentDetectionResult> {
     if (typeof window === "undefined") return { status: "skipped", reason: "browser_only" };
 
-    const [memoryStorage, timelineAssembler, settingsStorage, characterStorage, apiHelpers, memoryEmbedding, memoryExtraction] = await Promise.all([
+    const [memoryStorage, settingsStorage, characterStorage, apiHelpers, memoryEmbedding, memoryExtraction] = await Promise.all([
         import("./memory-storage"),
-        import("./short-term-assembler"),
         import("./settings-storage"),
         import("./character-storage"),
         import("./api-helpers"),
@@ -447,16 +543,7 @@ async function runFutureIntentDetection(characterId: string): Promise<FutureInte
     const config = memoryStorage.loadMemoryConfig();
     if (config.futureIntentEnabled === false) return { status: "disabled" };
 
-    const entries = timelineAssembler.filterTimelineByAllowedSources(
-        timelineAssembler.loadNativeTimeline(characterId),
-        config.shortTermAllowedSources,
-    );
-    const event = entries[entries.length - 1];
-    if (!event || lastScannedEventIds.get(characterId) === event.id) {
-        return { status: "skipped", reason: "event_already_scanned" };
-    }
     if (!hasFutureIntentSignal(event.content)) {
-        lastScannedEventIds.set(characterId, event.id);
         return { status: "skipped", reason: "heuristic_miss" };
     }
 
@@ -483,7 +570,6 @@ async function runFutureIntentDetection(characterId: string): Promise<FutureInte
             .map(candidate => normalizeFutureIntentCandidate({ ...candidate, sourceEventRefs: [event.id] }, timeContext))
             .filter((candidate): candidate is ExtractedMemoryCandidate => Boolean(candidate))
         : [];
-    lastScannedEventIds.set(characterId, event.id);
     const candidate = candidates[0];
     if (!candidate) return { status: "no_candidate" };
 

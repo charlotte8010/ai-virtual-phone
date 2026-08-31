@@ -15,6 +15,7 @@ import {
     loadChatAppSettings,
     getMaxToolRounds,
     loadChatSessions,
+    loadChatMessages,
     saveChatSessions,
     getLatestCharacterStateValues,
     normalizeVisionImagePromptLimit,
@@ -2712,8 +2713,23 @@ async function generateChatCompletionCore(
     // Memory: increment event counter + check if summarization needed (non-blocking)
     (async () => {
         try {
-            incrementEventCounter(character.id); // user message
-            incrementEventCounter(character.id); // AI reply
+            const latestUserMessage = [...history].reverse().find(message =>
+                message.sessionId === session.id && message.role === "user",
+            );
+            const latestAssistantMessage = [...loadChatMessages(session.id)].reverse().find(message =>
+                message.role === "assistant" && message.sessionId === session.id,
+            );
+            const recentMessages = [latestUserMessage, latestAssistantMessage];
+            for (let index = 0; index < 2; index += 1) {
+                const message = recentMessages[index];
+                incrementEventCounter(character.id, message ? {
+                    id: message.id,
+                    sourceApp: "chat",
+                    timestamp: message.createdAt,
+                    content: message.content,
+                    sessionId: message.sessionId,
+                } : undefined);
+            }
             await maybeRunSummarization(character.id, character.name);
         } catch (err) {
             console.warn("[ChatEngine] Memory counter/summarization failed:", err);

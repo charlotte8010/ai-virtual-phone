@@ -365,8 +365,13 @@ async function triggerAIPost(characterId: string): Promise<void> {
             attachMomentPhotoInBackground(post.id, parsed.photoDescription, characterId, parsed.photoUseReferenceImage === true);
         }
 
-        // Increment event counter for auto-summarization (native data read at summarization time)
-        incrementEventCounter(characterId);
+        // Pass the write result so immediate detection processes this exact post.
+        incrementEventCounter(characterId, {
+            id: post.id,
+            sourceApp: "moments",
+            timestamp: post.createdAt,
+            content: post.content,
+        });
         maybeRunSummarization(characterId, character.name)
             .catch(err => console.warn("[Moments] Summarization check failed:", err));
 
@@ -775,6 +780,7 @@ async function generateAIComment(post: MomentPost, character: Character): Promis
     const userName = getUserName(character.id);
     const chars = loadCharacters();
     const existingComments = getVisibleMomentCommentsForCharacter(post, character.id, loadMomentComments(post.id));
+    let createdComment: MomentComment;
 
     // Check if the AI wants to reply to a specific commenter: [回复 昵称] 内容
     const replyMatch = /^\[回复\s*(.+?)\]\s*(.+)/s.exec(cleaned);
@@ -817,7 +823,7 @@ async function generateAIComment(post: MomentPost, character: Character): Promis
                 replyToCommentId = latestByTarget.id;
             }
 
-            addMomentComment({
+            createdComment = addMomentComment({
                 postId: post.id,
                 authorType: "character",
                 authorId: character.id,
@@ -831,7 +837,7 @@ async function generateAIComment(post: MomentPost, character: Character): Promis
             return false;
         }
     } else {
-        addMomentComment({
+        createdComment = addMomentComment({
             postId: post.id,
             authorType: "character",
             authorId: character.id,
@@ -840,7 +846,12 @@ async function generateAIComment(post: MomentPost, character: Character): Promis
     }
 
     // Increment event counter for auto-summarization (native data read at summarization time)
-    incrementEventCounter(character.id);
+    incrementEventCounter(character.id, {
+        id: createdComment.id,
+        sourceApp: "moments",
+        timestamp: createdComment.createdAt,
+        content: createdComment.content,
+    });
     maybeRunSummarization(character.id, character.name)
         .catch(err => console.warn("[Moments] Summarization check failed:", err));
 
@@ -977,6 +988,7 @@ async function triggerCharacterReply(
     let match: RegExpExecArray | null;
     let repliedAny = false;
     let repliedToUser = false;
+    let lastCreatedComment: MomentComment | undefined;
 
     while ((match = replyPattern.exec(replyText)) !== null) {
         const replyToName = match[1].trim();
@@ -1028,7 +1040,7 @@ async function triggerCharacterReply(
             continue;
         }
 
-        addMomentComment({
+        lastCreatedComment = addMomentComment({
             postId: post.id,
             authorType: "character",
             authorId: characterId,
@@ -1046,7 +1058,12 @@ async function triggerCharacterReply(
         dispatchMomentsUpdated();
 
         // Increment event counter for auto-summarization
-        incrementEventCounter(characterId);
+        incrementEventCounter(characterId, lastCreatedComment ? {
+            id: lastCreatedComment.id,
+            sourceApp: "moments",
+            timestamp: lastCreatedComment.createdAt,
+            content: lastCreatedComment.content,
+        } : undefined);
         maybeRunSummarization(characterId, character.name)
             .catch(err => console.warn("[Moments] Summarization check failed:", err));
     }

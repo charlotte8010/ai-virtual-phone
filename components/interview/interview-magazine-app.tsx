@@ -695,7 +695,7 @@ export function InterviewMagazineApp({ onClose }: Props) {
         updatedAt: now,
       };
       const savedIssues = saveInterviewIssue(issue);
-      recordInterviewMagazineProjectionEvent({
+      const projectionEntry = recordInterviewMagazineProjectionEvent({
         issueId: issue.id,
         issueNumber,
         title: issue.article.title,
@@ -707,7 +707,12 @@ export function InterviewMagazineApp({ onClose }: Props) {
         timestamp: now,
       });
       for (const guest of result.context.guests) {
-        incrementEventCounter(guest.character.id);
+        incrementEventCounter(guest.character.id, projectionEntry ? {
+          id: projectionEntry.id,
+          sourceApp: "interview_magazine",
+          timestamp: projectionEntry.timestamp,
+          content: projectionEntry.content,
+        } : undefined);
         maybeRunSummarization(guest.character.id, guest.character.name).catch((summarizeError) => {
           console.warn("[InterviewMagazine] Summarization check failed:", summarizeError);
         });

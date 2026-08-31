@@ -653,8 +653,17 @@ export function StoryApp({ onClose }: StoryAppProps) {
       if (storyCharacter) {
         void (async () => {
           try {
-            incrementEventCounter(characterId);
-            incrementEventCounter(characterId);
+            const recentMessages = loadStoryMessages(sessionId).slice(-2);
+            for (let index = 0; index < 2; index += 1) {
+              const message = recentMessages[index];
+              incrementEventCounter(characterId, message ? {
+                id: message.id,
+                sourceApp: "story",
+                timestamp: message.createdAt,
+                content: message.renderedContent || message.rawContent,
+                sessionId,
+              } : undefined);
+            }
             await maybeRunSummarization(characterId, storyCharacter.name);
           } catch (err) {
             console.warn("[StoryApp] Memory counter/summarization failed:", err);

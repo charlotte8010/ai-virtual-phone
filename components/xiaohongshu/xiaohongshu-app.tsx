@@ -71,6 +71,7 @@ import {
   recordXiaohongshuReplyEvent,
 } from "@/lib/xiaohongshu-memory";
 import { resolveCharacterXiaohongshuDisplayName } from "@/lib/xiaohongshu-character-profile";
+import type { FutureIntentEvent } from "@/lib/future-intent-detector";
 import type { ChatSharePayload } from "@/lib/chat-share";
 import { CheckPhoneDebugErrorCard } from "@/components/checkphone/checkphone-debug-error-card";
 import {
@@ -1102,8 +1103,14 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
     }
   }
 
-  function touchCharacterMemory(character: Character) {
-    incrementEventCounter(character.id);
+  function toFutureIntentEvent(
+    event: { id: string; timestamp: string; content: string } | null | undefined,
+  ): FutureIntentEvent | undefined {
+    return event ? { ...event, sourceApp: "xiaohongshu" } : undefined;
+  }
+
+  function touchCharacterMemory(character: Character, event?: FutureIntentEvent) {
+    incrementEventCounter(character.id, event);
     maybeRunSummarization(character.id, character.name)
       .catch(err => console.warn("[Xiaohongshu] Summarization check failed:", err));
   }
@@ -1374,7 +1381,7 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
           });
           nextNote = result.note;
           collectedNotifications.push(...result.notifications);
-          recordXiaohongshuCommentEvent({
+          const commentEvent = recordXiaohongshuCommentEvent({
             characterId: character.id,
             characterName: character.name,
             note,
@@ -1383,19 +1390,19 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
             saved: parsed.saved,
           });
           recordCharacterThreadCommentEvents(character, note, result.note, result.threadComments);
-          touchCharacterMemory(character);
+          touchCharacterMemory(character, toFutureIntentEvent(commentEvent));
         }
         return nextNote;
       });
       const characterPost = createCharacterPost(character, activity);
       if (characterPost) {
-        recordXiaohongshuPostEvent({
+        const postEvent = recordXiaohongshuPostEvent({
           characterId: character.id,
           characterName: character.name,
           note: characterPost,
         });
         recordCharacterThreadCommentEvents(character, characterPost, characterPost, characterPost.comments);
-        touchCharacterMemory(character);
+        touchCharacterMemory(character, toFutureIntentEvent(postEvent));
       }
       current = saveXiaohongshuState({
         ...current,
@@ -1602,7 +1609,7 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
           notifications: [...applied.notifications, ...current.notifications],
         };
         if (addedComment) {
-          recordXiaohongshuCommentEvent({
+          const commentEvent = recordXiaohongshuCommentEvent({
             characterId: character.id,
             characterName: character.name,
             note: latestNote,
@@ -1611,18 +1618,18 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
             saved: reaction.saved,
           });
           recordCharacterThreadCommentEvents(character, latestNote, applied.note, applied.threadComments);
-          touchCharacterMemory(character);
+          touchCharacterMemory(character, toFutureIntentEvent(commentEvent));
         }
         if (reaction.followedAuthor) {
           const followerResult = addFollowersToState(nextAfterCharacter, [makeCharacterAccount(character)], latestNote);
           nextAfterCharacter = followerResult.next;
           if (followerResult.added.length > 0) {
-            recordXiaohongshuFollowUserEvent({
+            const followEvent = recordXiaohongshuFollowUserEvent({
               characterId: character.id,
               characterName: character.name,
               userDisplayName: latestNote.authorName,
             });
-            touchCharacterMemory(character);
+            touchCharacterMemory(character, toFutureIntentEvent(followEvent));
           }
         }
         current = saveXiaohongshuState(nextAfterCharacter);
@@ -1794,7 +1801,7 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
           const applied = applyCharacterMentionReply(latestNote, mentionCharacter, reaction, userComment.id);
           const addedComment = findAddedCharacterComment(latestNote, applied.note, mentionCharacter);
           if (addedComment) {
-            recordXiaohongshuReplyEvent({
+            const replyEvent = recordXiaohongshuReplyEvent({
               characterId: mentionCharacter.id,
               characterName: mentionCharacter.name,
               note: latestNote,
@@ -1802,7 +1809,7 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
               targetComment: userComment,
             });
             recordCharacterThreadCommentEvents(mentionCharacter, latestNote, applied.note, applied.threadComments);
-            touchCharacterMemory(mentionCharacter);
+            touchCharacterMemory(mentionCharacter, toFutureIntentEvent(replyEvent));
           }
           current = saveXiaohongshuState({
             ...current,
@@ -1826,7 +1833,7 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
             const applied = applyCharacterCommentReply(latestNote, character, reaction, userComment.id);
             const addedComment = findAddedCharacterComment(latestNote, applied.note, character);
             if (addedComment) {
-              recordXiaohongshuReplyEvent({
+              const replyEvent = recordXiaohongshuReplyEvent({
                 characterId: character.id,
                 characterName: character.name,
                 note: latestNote,
@@ -1834,7 +1841,7 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
                 targetComment: userComment,
               });
               recordCharacterThreadCommentEvents(character, latestNote, applied.note, applied.threadComments);
-              touchCharacterMemory(character);
+              touchCharacterMemory(character, toFutureIntentEvent(replyEvent));
             }
             current = saveXiaohongshuState({
               ...current,

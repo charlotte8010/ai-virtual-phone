@@ -264,8 +264,16 @@ function scheduleGroupMemorySummarization(
         const character = chars.find(c => c.id === characterId);
         if (!character) continue;
 
+        const recentMessages = history.slice(-totalNewEvents);
         for (let i = 0; i < totalNewEvents; i++) {
-            incrementEventCounter(characterId);
+            const message = recentMessages[i];
+            incrementEventCounter(characterId, message ? {
+                id: message.id,
+                sourceApp: "chat",
+                timestamp: message.createdAt,
+                content: message.content,
+                sessionId: message.sessionId,
+            } : undefined);
         }
 
         maybeRunSummarization(characterId, character.name)

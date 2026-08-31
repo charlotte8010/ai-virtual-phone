@@ -1656,7 +1656,13 @@ export function CoCreateApp({ onClose, onNotice }: CoCreateAppProps) {
         });
         return saved;
       });
-      incrementEventCounter(partner.id);
+      incrementEventCounter(partner.id, {
+        id: `cocreate_${session.id}_${targetChapterId || summarizedAt}`,
+        sourceApp: "cocreate",
+        timestamp: summarizedAt,
+        content: result.memory,
+        sessionId: session.id,
+      });
       maybeRunSummarization(partner.id, partner.name).catch((summarizeError) => {
         console.warn("[cocreate] long-term memory summarization failed", summarizeError);
       });

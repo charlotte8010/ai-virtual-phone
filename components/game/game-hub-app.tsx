@@ -2161,7 +2161,12 @@ export function GameHubApp({ onClose, autoOpenLocalId }: { onClose: () => void; 
         if (result.entry) {
           recorded += 1;
           try {
-            incrementEventCounter(characterId);
+            incrementEventCounter(characterId, {
+              id: result.entry.id,
+              sourceApp: "game",
+              timestamp: result.entry.timestamp,
+              content: result.entry.summary,
+            });
             maybeRunSummarization(characterId, character.name)
               .catch(err => console.warn("[GameHub] Summarization check failed:", err));
           } catch (err) {
