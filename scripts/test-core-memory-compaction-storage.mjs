@@ -94,8 +94,12 @@ function createTransaction(storeNames) {
                 },
             };
         },
+        abort() {
+            aborted = true;
+            transactionError ??= new Error("Transaction aborted");
+        },
     };
-    Promise.resolve().then(() => {
+    setTimeout(() => {
         if (aborted) {
             transaction.error = transactionError;
             transaction.onerror?.();

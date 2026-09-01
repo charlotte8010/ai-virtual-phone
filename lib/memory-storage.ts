@@ -26,6 +26,7 @@ export interface MemoryPersistenceOptions {
 }
 
 export interface CoreMemoryReplacementRequest {
+    characterId: string;
     snapshot: CoreCompactionSnapshot;
     originalEntries: MemoryEntry[];
     newEntries: MemoryEntry[];
@@ -210,12 +211,43 @@ export async function loadMemoryEntriesByType(
     return entries.filter(entry => entry.type === type);
 }
 
+/** Maintenance-only raw Core loader; unlike ordinary reads it never normalizes legacy fields. */
+export async function loadRawCoreMemoryEntries(characterId: string): Promise<MemoryEntry[]> {
+    const db = await openDb();
+    if (!db) return [];
+    try {
+        let entries: MemoryEntry[];
+        try {
+            const tx = db.transaction(STORE_NAME, "readonly");
+            entries = await runRequest(
+                tx.objectStore(STORE_NAME).index("by_character_type").getAll([characterId, "core"]),
+            );
+        } catch {
+            const tx = db.transaction(STORE_NAME, "readonly");
+            const allEntries: MemoryEntry[] = await runRequest(tx.objectStore(STORE_NAME).getAll());
+            entries = allEntries.filter(entry => entry.characterId === characterId && entry.type === "core");
+        }
+        return entries
+            .filter(entry => entry.characterId === characterId && entry.type === "core")
+            .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    } finally {
+        db.close();
+    }
+}
+
+function exactRecordsFingerprint(entries: readonly MemoryEntry[]): string {
+    return JSON.stringify(entries);
+}
+
 /** Replace one character's Core set and persist its exact rollback snapshot atomically. */
 export async function replaceCoreMemoriesWithSnapshot(
     request: CoreMemoryReplacementRequest,
 ): Promise<void> {
     if (request.originalEntries.length === 0 || request.newEntries.length === 0) {
         throw new Error("核心记忆整理需要同时存在原始记录和候选记录");
+    }
+    if (request.snapshot.characterId !== request.characterId) {
+        throw new Error("核心记忆整理快照角色不一致");
     }
     const db = await openDb();
     if (!db) throw new Error("记忆数据库不可用");
@@ -226,12 +258,49 @@ export async function replaceCoreMemoriesWithSnapshot(
         const tx = db.transaction([STORE_NAME, CORE_COMPACTION_SNAPSHOT_STORE_NAME], "readwrite");
         const memoryStore = tx.objectStore(STORE_NAME);
         const snapshotStore = tx.objectStore(CORE_COMPACTION_SNAPSHOT_STORE_NAME);
-        for (const entry of request.originalEntries) memoryStore.delete(entry.id);
-        // add(), rather than put(), makes an unexpected deterministic ID
-        // collision abort this transaction without overwriting existing data.
-        for (const entry of request.newEntries) memoryStore.add(entry);
-        snapshotStore.add(request.snapshot);
-        await transactionDone(tx);
+        const completed = transactionDone(tx);
+        let operationError: Error | null = null;
+        const rawRequest = memoryStore.getAll();
+        rawRequest.onsuccess = () => {
+            try {
+                const rawOriginalEntries = (rawRequest.result as MemoryEntry[])
+                    .filter(entry => entry.characterId === request.characterId && entry.type === "core")
+                    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+                if (exactRecordsFingerprint(rawOriginalEntries) !== exactRecordsFingerprint(request.originalEntries)) {
+                    throw new Error("核心记忆在原子替换前发生变化，请重新预览");
+                }
+
+                const exactSnapshot: CoreCompactionSnapshot = {
+                    ...request.snapshot,
+                    originalEntries: rawOriginalEntries,
+                };
+                for (const entry of rawOriginalEntries) memoryStore.delete(entry.id);
+                // add(), rather than put(), makes an unexpected deterministic ID
+                // collision abort this transaction without overwriting existing data.
+                for (const entry of request.newEntries) memoryStore.add(entry);
+                snapshotStore.add(exactSnapshot);
+            } catch (error) {
+                operationError = error instanceof Error ? error : new Error(String(error));
+                try {
+                    tx.abort();
+                } catch {
+                    // The transaction may already have aborted itself.
+                }
+            }
+        };
+        rawRequest.onerror = () => {
+            operationError = rawRequest.error ?? new Error("核心记忆原始记录读取失败");
+            try {
+                tx.abort();
+            } catch {
+                // The transaction may already have aborted itself.
+            }
+        };
+        try {
+            await completed;
+        } catch (error) {
+            throw operationError ?? error;
+        }
     } finally {
         db.close();
     }

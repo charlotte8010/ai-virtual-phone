@@ -1,6 +1,6 @@
 import type { CoreCompactionSnapshot, MemoryEntry, MemoryKind, MemoryMood } from "./memory-types";
 import {
-    loadMemoryEntriesByType,
+    loadRawCoreMemoryEntries,
     loadLatestCoreCompactionSnapshot,
     replaceCoreMemoriesWithSnapshot,
     restoreCoreCompactionSnapshot,
@@ -70,7 +70,7 @@ type CompactionSuccess<T extends object = object> = { success: true } & T;
 
 function getDefaultDependencies(): CoreCompactionDependencies {
     return {
-        loadCoreEntries: (characterId) => loadMemoryEntriesByType(characterId, "core"),
+        loadCoreEntries: loadRawCoreMemoryEntries,
         resolveApiConfig: resolveAuxiliaryApiConfig,
         callLlm: simpleLLMCall,
         replace: replaceCoreMemoriesWithSnapshot,
@@ -310,7 +310,12 @@ export async function applyCoreMemoryCompaction(
         createdMemoryIds: newEntries.map(entry => entry.id),
     };
     try {
-        await deps.replace({ snapshot, originalEntries: currentEntries, newEntries });
+        await deps.replace({
+            characterId: preview.characterId,
+            snapshot,
+            originalEntries: currentEntries,
+            newEntries,
+        });
         return { success: true, runId, createdCount: newEntries.length };
     } catch (error) {
         return {
