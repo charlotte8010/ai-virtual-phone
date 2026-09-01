@@ -2158,7 +2158,7 @@ recency 下降
 
 建议保留现有 Core pipeline，但增加过滤。
 
-送给 Core Builder 之前：
+送给 Core Builder 之前，必须在 `lib/core-memory-builder.ts` 的 input boundary 过滤：
 
 ```ts
 const coreEligibleEntries =
@@ -2174,13 +2174,15 @@ const coreEligibleEntries =
 更完整的后续规则：
 
 ```text
-future_intent pending   → 不进 Core
-future_intent overdue   → 不进 Core
-future_intent cancelled → 不进 Core
+任何 kind === "future_intent" 的 MemoryEntry
+（pending / overdue / fulfilled / cancelled）→ 不进 Core
 
-future_intent fulfilled
-→ 先转化为发生过的 event / relationship memory
+fulfilled 后的真实经历
+→ 由独立的 event / relationship / fact memory 表达
 → 再由普通 Core 逻辑判断
+
+kind 缺失的 legacy memory → 保持原兼容行为，继续参与 Core
+过滤后没有合格长期记忆 → 安全 no-op，不生成 Core
 ```
 
 例如：
@@ -3262,9 +3264,12 @@ MemoryLink 再升级 DB。
 
 ## `lib/core-memory-builder.ts`
 
-### 必改
+### C7 ownership / 必改
 
-- 排除 active Future Intent；
+- 在 input boundary 排除所有 `kind === "future_intent"` 的 MemoryEntry；
+- 不删除、不修改 Future Intent，也不改变其 lifecycle；
+- `kind` 缺失的 legacy memory 保持 eligible；
+- 过滤后没有合格长期记忆时安全 no-op；
 - Core prompt 加入“未发生计划不得成为稳定核心”；
 - fulfilled plan 应先转成普通 event/relationship memory 再考虑 Core。
 
@@ -3597,9 +3602,14 @@ pending
 
 ---
 
-## Commit 10 — Core Memory Guardrails
+## C7 — Core Memory Guardrails
 
-防止 pending / overdue / cancelled Future Intent 进入 Core。
+> 对应旧 unified roadmap 的 Commit 10；当前工程编号固定为 C7。
+
+`lib/core-memory-builder.ts` 在输入边界排除所有 `kind === "future_intent"` 的 MemoryEntry，
+无论其状态是 pending、overdue、fulfilled 还是 cancelled。
+
+该过滤不删除、不修改 Future Intent，也不推进其 lifecycle；缺失 `kind` 的 legacy memory 继续保持原有兼容行为。
 
 完成后的真实经历先形成 event / relationship，再由 Core builder 判断长期稳定性。
 

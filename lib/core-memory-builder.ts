@@ -22,6 +22,10 @@ type CoreTimelineItem = {
     sourceSessionIds: string[];
 };
 
+function filterCoreMemoryInputEntries(entries: readonly MemoryEntry[]): MemoryEntry[] {
+    return entries.filter(entry => entry.kind !== "future_intent");
+}
+
 function formatCoreTimelineForSummarization(
     entries: CoreTimelineItem[],
 ): { eventsText: string; earliest: string; latest: string; count: number } | null {
@@ -40,7 +44,9 @@ export async function runCoreMemoryPipeline(
     options?: { force?: boolean },
 ): Promise<{ success: boolean; error?: string; rebuiltCount?: number }> {
     const config = loadMemoryConfig();
-    const allLongTermEntries = await loadMemoryEntriesByType(characterId, "long_term");
+    const allLongTermEntries = filterCoreMemoryInputEntries(
+        await loadMemoryEntriesByType(characterId, "long_term"),
+    );
 
     if (allLongTermEntries.length === 0) {
         return { success: false, error: "没有可用于总结核心记忆的长期记忆" };
