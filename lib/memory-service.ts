@@ -76,7 +76,7 @@ export async function selectMemoriesForPrompt(
     }
 
     const memories = await loadMemoryEntriesByType(characterId, "long_term");
-    if (memories.length === 0 || !currentContext.trim()) {
+    if (memories.length === 0) {
         return {
             selected: [],
             futureIntents: [],
@@ -124,44 +124,46 @@ export async function selectMemoriesForPrompt(
         });
     };
 
-    const keywordResults = searchMemoryText(
-        currentContext,
-        memories,
-        options.keywordTopK ?? KEYWORD_TOP_K,
-    );
-    for (const result of keywordResults) {
-        channelCounts.keyword += 1;
-        addCandidate({
-            memory: result.entry,
-            source: "keyword",
-            keywordScore: result.keywordScore,
-            tagScore: result.tagScore,
-        });
-    }
+    if (currentContext.trim()) {
+        const keywordResults = searchMemoryText(
+            currentContext,
+            memories,
+            options.keywordTopK ?? KEYWORD_TOP_K,
+        );
+        for (const result of keywordResults) {
+            channelCounts.keyword += 1;
+            addCandidate({
+                memory: result.entry,
+                source: "keyword",
+                keywordScore: result.keywordScore,
+                tagScore: result.tagScore,
+            });
+        }
 
-    const embeddingApiConfig = config.vectorRecallEnabled
-        ? resolveAuxiliaryApiConfig("embeddingApiConfigId")
-        : null;
-    const vectorTopK = Math.max(0, Math.floor(options.vectorTopK ?? VECTOR_TOP_K));
-    if (embeddingApiConfig && resolveEmbeddingModel(embeddingApiConfig)) {
-        try {
-            const queryEmbedding = await generateEmbedding(currentContext, embeddingApiConfig);
-            if (queryEmbedding) {
-                const vectorResults = memories
-                    .filter(entry => Array.isArray(entry.embedding) && entry.embedding.length > 0)
-                    .map(entry => ({
-                        entry,
-                        score: cosineSimilarity(queryEmbedding, entry.embedding ?? []),
-                    }))
-                    .sort((left, right) => right.score - left.score)
-                    .slice(0, vectorTopK);
-                for (const result of vectorResults) {
-                    channelCounts.vector += 1;
-                    addCandidate({ memory: result.entry, source: "vector", semanticScore: result.score });
+        const embeddingApiConfig = config.vectorRecallEnabled
+            ? resolveAuxiliaryApiConfig("embeddingApiConfigId")
+            : null;
+        const vectorTopK = Math.max(0, Math.floor(options.vectorTopK ?? VECTOR_TOP_K));
+        if (embeddingApiConfig && resolveEmbeddingModel(embeddingApiConfig)) {
+            try {
+                const queryEmbedding = await generateEmbedding(currentContext, embeddingApiConfig);
+                if (queryEmbedding) {
+                    const vectorResults = memories
+                        .filter(entry => Array.isArray(entry.embedding) && entry.embedding.length > 0)
+                        .map(entry => ({
+                            entry,
+                            score: cosineSimilarity(queryEmbedding, entry.embedding ?? []),
+                        }))
+                        .sort((left, right) => right.score - left.score)
+                        .slice(0, vectorTopK);
+                    for (const result of vectorResults) {
+                        channelCounts.vector += 1;
+                        addCandidate({ memory: result.entry, source: "vector", semanticScore: result.score });
+                    }
                 }
+            } catch (error) {
+                console.warn("[MemoryService] Vector recall failed; continuing with local channels", error);
             }
-        } catch (error) {
-            console.warn("[MemoryService] Vector recall failed; continuing with local channels", error);
         }
     }
 
