@@ -14,6 +14,7 @@
     "test:future-intent-detector": "node scripts/test-future-intent-detector.mjs",
     "test:future-intent-lifecycle": "node scripts/test-future-intent-lifecycle.mjs",
     "test:core-memory-builder": "node --no-warnings --experimental-vm-modules scripts/test-core-memory-builder.mjs",
+    "test:core-memory-compaction": "node --no-warnings --experimental-vm-modules scripts/test-core-memory-compaction.mjs",
     "test:memory-retrieval": "node --no-warnings --experimental-vm-modules scripts/test-memory-retrieval.mjs",
     "test:memory-ranking": "node scripts/test-memory-ranking.mjs",
     "test:memory-recall-stats": "node --no-warnings --experimental-vm-modules scripts/test-memory-recall-stats.mjs",
