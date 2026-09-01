@@ -159,6 +159,60 @@ assert.equal(normalizedReplacementDecision.targetIndex, 1);
 assert.equal(normalizedReplacementDecision.replacement.futureIntent.status, "pending");
 assert.equal(normalizedReplacementDecision.replacement.futureIntent.targetAt, "2026-09-07T00:00:00+08:00");
 
+const mismatchedTimezoneDecision = lifecycle.parseFutureIntentLifecycleModelOutput(
+    JSON.stringify({
+        action: "replaced",
+        target: "F1",
+        replacement: {
+            content: "周六跟小王的电影改到周日晚上",
+            type: "plan",
+            timePrecision: "day",
+            targetAt: "2026-09-07T00:00:00+08:00",
+            originalTimeExpression: "周日晚上",
+            timezone: "America/New_York",
+        },
+    }),
+    lifecycleCandidatesFromEntries(classifierCandidates),
+    classifierTimeContext,
+);
+assert.equal(mismatchedTimezoneDecision, null);
+
+const omittedTimezoneDecision = lifecycle.parseFutureIntentLifecycleModelOutput(
+    JSON.stringify({
+        action: "replaced",
+        target: "F1",
+        replacement: {
+            content: "周六跟小王的电影改到周日晚上",
+            type: "plan",
+            timePrecision: "day",
+            targetAt: "2026-09-07T00:00:00+08:00",
+            originalTimeExpression: "周日晚上",
+        },
+    }),
+    lifecycleCandidatesFromEntries(classifierCandidates),
+    classifierTimeContext,
+);
+assert.equal(omittedTimezoneDecision.action, "replaced");
+assert.equal(omittedTimezoneDecision.replacement.futureIntent.timezone, "Asia/Shanghai");
+
+const unavailableReferenceTimezoneDecision = lifecycle.parseFutureIntentLifecycleModelOutput(
+    JSON.stringify({
+        action: "replaced",
+        target: "F1",
+        replacement: {
+            content: "周六跟小王的电影改到周日晚上",
+            type: "plan",
+            timePrecision: "day",
+            targetAt: "2026-09-07T00:00:00+08:00",
+            originalTimeExpression: "周日晚上",
+            timezone: "Asia/Shanghai",
+        },
+    }),
+    lifecycleCandidatesFromEntries(classifierCandidates),
+    { now: new Date(classifierEvent.timestamp), timezone: "Invalid/Timezone" },
+);
+assert.equal(unavailableReferenceTimezoneDecision, null);
+
 const classifierFulfilled = lifecycle.decideFutureIntentTransition(
     classifierCandidates[0],
     event("classifier-complete", "电影刚看完"),

@@ -473,7 +473,13 @@ function parseReplacementCandidate(
     } else if (targetAt !== undefined || targetEndAt !== undefined) {
         return undefined;
     }
-    if (value.timezone !== undefined && (typeof value.timezone !== "string" || !isValidTimeZone(value.timezone))) return undefined;
+    const referenceTimezone = isValidTimeZone(timeContext.timezone) ? timeContext.timezone : undefined;
+    if (value.timezone !== undefined && (
+        typeof value.timezone !== "string"
+        || !isValidTimeZone(value.timezone)
+        || !referenceTimezone
+        || value.timezone !== referenceTimezone
+    )) return undefined;
 
     const normalized = normalizeFutureIntentCandidate({
         content,
