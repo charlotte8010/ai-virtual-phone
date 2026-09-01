@@ -1,22 +1,32 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import * as ts from "typescript";
 
 async function loadTypeScriptModule(relativePath) {
-    const sourceUrl = new URL(`../${relativePath}`, import.meta.url);
-    const source = await readFile(sourceUrl, "utf8");
-    const transpiled = ts.transpileModule(source, {
-        compilerOptions: {
-            target: ts.ScriptTarget.ES2022,
-            module: ts.ModuleKind.ESNext,
-            moduleResolution: ts.ModuleResolutionKind.Bundler,
-        },
-    });
     const tempDir = await mkdtemp(join(process.cwd(), ".tmp-future-intent-"));
-    const modulePath = join(tempDir, "module.mjs");
-    await writeFile(modulePath, transpiled.outputText, "utf8");
+    const relativeModules = relativePath === "lib/future-intent-detector.ts"
+        ? [relativePath, "lib/memory-extraction.ts"]
+        : [relativePath];
+    const moduleNames = new Map(relativeModules.map(item => [item, `${basename(item, ".ts")}.mjs`]));
+    const modulePath = join(tempDir, moduleNames.get(relativePath));
+    for (const dependencyPath of relativeModules) {
+        const sourceUrl = new URL(`../${dependencyPath}`, import.meta.url);
+        const source = await readFile(sourceUrl, "utf8");
+        const transpiled = ts.transpileModule(source, {
+            compilerOptions: {
+                target: ts.ScriptTarget.ES2022,
+                module: ts.ModuleKind.ESNext,
+                moduleResolution: ts.ModuleResolutionKind.Bundler,
+            },
+        });
+        let output = transpiled.outputText;
+        for (const [dependency, outputName] of moduleNames) {
+            output = output.replaceAll(`./${basename(dependency, ".ts")}`, `./${outputName}`);
+        }
+        await writeFile(join(tempDir, moduleNames.get(dependencyPath)), output, "utf8");
+    }
     try {
         return await import(`${pathToFileURL(modulePath).href}?${Date.now()}`);
     } finally {
@@ -36,6 +46,19 @@ assert.equal(detector.hasFutureIntentSignal("明早八点叫我"), true);
 assert.equal(detector.hasFutureIntentSignal("今晚提醒我"), true);
 assert.equal(detector.hasFutureIntentSignal("刚才一起看了电影"), false);
 assert.equal(detector.hasFutureIntentSignal("明天的天气不错"), false);
+for (const text of [
+    "下次一起去吧",
+    "改天带你去",
+    "有空一起吃",
+    "等你回来一起看",
+    "等我忙完陪你",
+    "毕业以后去旅行",
+    "回来以后找你",
+    "哪天一起去",
+]) {
+    assert.equal(detector.hasFutureIntentSignal(text), true, text);
+}
+assert.equal(detector.hasFutureIntentSignal("我想知道这个是什么意思"), false);
 
 const persistedAssistant = {
     id: "chat_assistant_new",
@@ -197,6 +220,18 @@ assert.equal(entry.sourceApp, "chat");
 assert.deepEqual(entry.sourceMessageIds, [event.id]);
 assert.equal(entry.metadata?.extractionMode, "immediate_future_intent");
 assert.equal(entry.futureIntent?.status, "pending");
+const directC3Creation = detector.buildFutureIntentMemoryEntry("char_1", event, {
+    ...parsed[0],
+    futureIntent: {
+        ...parsed[0].futureIntent,
+        status: "fulfilled",
+        fulfilledAt: "2026-09-01T21:00:00.000Z",
+        replacedByMemoryId: "should-not-survive-creation",
+    },
+}, new Date("2026-08-31T14:01:00.000Z"));
+assert.equal(directC3Creation.futureIntent.status, "pending");
+assert.equal(directC3Creation.futureIntent.fulfilledAt, undefined);
+assert.equal(directC3Creation.futureIntent.replacedByMemoryId, undefined);
 
 const sameEvent = { ...entry, id: "existing_1" };
 assert.equal(detector.isFutureIntentDuplicate(entry, sameEvent), true);

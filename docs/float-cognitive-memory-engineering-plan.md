@@ -137,7 +137,11 @@ Commit 1 — Types & Compatibility          ✅
 Commit 2 — Atomic Extraction              ✅
 Commit 3 — Future Intent Immediate Path   ✅
 Commit 4 — Cognitive Retrieval v1         ✅
+C5 — Recall Stats & Stability             ✅
+C6 — Future Intent Lifecycle              ✅
 ```
+
+本阶段编号说明：`C5` 对应旧 unified roadmap 的 Commit 8，`C6` 对应旧 unified roadmap 的 Commit 9；只更新当前工程编号，不 rewrite Git history。
 
 工程门槛明确区分：
 
@@ -1080,7 +1084,7 @@ save long_term future_intent
 
 不应该每条聊天都调用模型。
 
-第一层用本地关键词 / 时间表达式：
+第一层用本地高召回关键词 / 时间表达式，只判断“是否值得询问 C3 Summary Model”，不判断最终是否创建：
 
 ```text
 今天晚上
@@ -1112,6 +1116,19 @@ save long_term future_intent
 想要
 一定会
 到时候陪
+```
+
+还要覆盖自然的未来构式，例如：
+
+```text
+下次一起去吧
+改天带你去
+有空一起吃
+等你回来一起看
+等我忙完陪你
+毕业以后去旅行
+回来以后找你
+哪天一起去
 ```
 
 ### 注意
@@ -1205,7 +1222,36 @@ interface MemoryTimeContext {
 
 # 14. Future Intent 生命周期
 
-推荐状态机：
+## 14.1 Semantic Ownership Principle
+
+```text
+LLM：理解当前 exact event 的语义
+Code：状态机、validation、时间规则、provenance、persistence
+```
+
+职责固定为：
+
+```text
+C2 periodic extraction
+→ 判断是不是新的 Future Intent
+→ 新建只能是 pending
+
+C3 immediate extraction
+→ 判断当前 exact event 是否形成新的 Future Intent
+→ 新建只能是 pending
+
+C6 lifecycle classifier
+→ 判断当前 exact event 对已有 intent 是 none / fulfilled / cancelled / replaced
+
+deterministic lifecycle
+→ 只按 targetAt / targetEndAt / timezone 派生 pending → overdue
+```
+
+终态语义不能由 regex、词汇重叠或候选列表中的第一条直接决定。启用 `memorySummaryApiConfigId` 时，C6 使用独立 lifecycle prompt；模型只看到临时 `F0`、`F1` 候选引用，代码再校验并映射回真实 memory。
+
+模型不可用、返回 malformed JSON、无效 action、无效 `F` index、歧义或 replacement validation 失败时，fulfilled/cancelled/replaced 安全 no-op；overdue maintenance 仍继续。
+
+## 14.2 状态机
 
 ```text
                    ┌─────────────┐
@@ -1223,7 +1269,7 @@ interface MemoryTimeContext {
 
 ---
 
-## 14.1 pending → overdue
+## 14.3 pending → overdue
 
 只适用于：
 
@@ -1246,7 +1292,7 @@ pending → overdue
 
 ---
 
-## 14.2 禁止自动 fulfilled
+## 14.4 禁止自动 fulfilled
 
 绝不能：
 
@@ -1266,7 +1312,7 @@ if (targetAt < now) {
 
 ---
 
-## 14.3 reschedule
+## 14.5 reschedule / replacement
 
 例如：
 
@@ -1274,7 +1320,7 @@ if (targetAt < now) {
 “周五不行，改周六吧”
 ```
 
-建议后续支持：
+使用现有 `replacedByMemoryId` 保存替代链：
 
 旧：
 
@@ -1294,7 +1340,9 @@ if (targetAt < now) {
 }
 ```
 
-第一版也可以只更新同一条记忆，但长期看“旧计划发生过改期”本身也是关系历史，保留替代链更完整。
+旧 intent 进入 `cancelled` 并记录 `cancelledAt`，新 intent 使用当前 exact event 的 `sourceApp` 和唯一 `sourceMessageIds`，经过与 C3 相同的时间 normalization 后以 `pending` 保存。旧 intent 不再是 active pending，old/new 必须在同一个 atomic write 中提交。重复同一 event 不得创建第二条 replacement。
+
+已知限制：一条 exact event 同时包含“电影改到周五，另外周六我们去爬山”时，当前不保证拆成多个独立 Future Intent；本轮不扩展 multi-intent 解析。
 
 ---
 
@@ -3533,7 +3581,9 @@ Debug preview / candidate generation 不计 recall。
 
 ---
 
-## Commit 9 — Future Intent Lifecycle
+## C6 — Future Intent Lifecycle
+
+> 对应旧 unified roadmap 的 Commit 9；当前工程编号固定为 C6。
 
 实现：
 
@@ -4018,7 +4068,7 @@ Memory Types & Backward Compatibility。
    ↓
 8. Recall Stats + Stability
    ↓
-9. Future Intent Lifecycle
+9. C6 Future Intent Lifecycle
    ↓
 10. Core Guardrails
    ↓

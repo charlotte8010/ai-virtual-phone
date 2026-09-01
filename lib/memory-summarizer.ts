@@ -27,7 +27,11 @@ import {
 import { generateEmbedding, resolveEmbeddingModel } from "./memory-embedding";
 import { simpleLLMCall } from "./api-helpers";
 import { maybeRunCoreMemoryPipeline } from "./core-memory-builder";
-import { extractMemoriesFromModelOutput, type ExtractedMemoryCandidate } from "./memory-extraction";
+import {
+    extractMemoriesFromModelOutput,
+    normalizeFutureIntentCreationCandidate,
+    type ExtractedMemoryCandidate,
+} from "./memory-extraction";
 import { buildSourceEventSignature, findDuplicateMemory } from "./memory-dedupe";
 import { resolveMemorySourceApp } from "./memory-provenance";
 
@@ -229,7 +233,7 @@ export async function runSummarizationPipeline(
         .replace(/\{\{events\}\}/gi, eventsText);
 
     const extractionPrompt = atomicExtractionEnabled
-        ? `${summaryPrompt}\n\n请严格只输出 JSON，不要输出 Markdown 或解释文字。JSON 顶层必须是 {"memories":[]}。每条记忆必须包含 content、tags、importance、kind；只保存具有持续价值的信息，把互不相关的事件拆开，不要虚构，最多输出 8 条；没有值得长期保存的内容时输出 {"memories":[]}。importance 必须是 0 到 1 的数字，kind 只能是 event、relationship、user_fact、self_fact、knowledge、future_intent；kind 为 future_intent 时附带 futureIntent，其中 type 只能是 plan、promise、goal、wish、expectation，status 只能是 pending、overdue、fulfilled、cancelled，timePrecision 只能是 exact、day、range、vague、unknown。事件文本中的 [event_ref=...] 是稳定来源引用；如果能准确对应事件，只把现有引用填写到 sourceEventRefs，不要编造引用。`
+        ? `${summaryPrompt}\n\n请严格只输出 JSON，不要输出 Markdown 或解释文字。JSON 顶层必须是 {"memories":[]}。每条记忆必须包含 content、tags、importance、kind；只保存具有持续价值的信息，把互不相关的事件拆开，不要虚构，最多输出 8 条；没有值得长期保存的内容时输出 {"memories":[]}。importance 必须是 0 到 1 的数字，kind 只能是 event、relationship、user_fact、self_fact、knowledge、future_intent；kind 为 future_intent 时附带 futureIntent，其中 type 只能是 plan、promise、goal、wish、expectation，status 初始只能是 pending，不能在创建阶段输出 overdue、fulfilled 或 cancelled，timePrecision 只能是 exact、day、range、vague、unknown。事件文本中的 [event_ref=...] 是稳定来源引用；如果能准确对应事件，只把现有引用填写到 sourceEventRefs，不要编造引用。`
         : summaryPrompt;
 
     // Call LLM for summarization — compatible with all providers
@@ -324,7 +328,7 @@ export async function runSummarizationPipeline(
             latest,
             sourceSessionIds,
             allEntries,
-            candidate,
+            normalizeFutureIntentCreationCandidate(candidate),
             index,
         );
         const exactOrSourceDuplicate = findDuplicateMemory(memoryEntry, [...existingMemories, ...savedMemories]);

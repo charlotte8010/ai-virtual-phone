@@ -24,6 +24,21 @@ export interface MemoryExtractionResult {
     invalidCount?: number;
 }
 
+/** Creation paths may read a model status, but lifecycle owns every non-pending status. */
+export function normalizeFutureIntentCreationCandidate(
+    candidate: ExtractedMemoryCandidate,
+): ExtractedMemoryCandidate {
+    if (candidate.kind !== "future_intent" || !candidate.futureIntent) return { ...candidate };
+    const { fulfilledAt: _fulfilledAt, cancelledAt: _cancelledAt, replacedByMemoryId: _replacedByMemoryId, ...intent } = candidate.futureIntent;
+    return {
+        ...candidate,
+        futureIntent: {
+            ...intent,
+            status: "pending",
+        },
+    };
+}
+
 const MAX_MEMORIES_PER_BATCH = 8;
 const MAX_TAGS_PER_MEMORY = 6;
 const MAX_TAG_LENGTH = 32;

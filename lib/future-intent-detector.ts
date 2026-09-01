@@ -1,5 +1,5 @@
 import { jsonrepair } from "jsonrepair";
-import type { ExtractedMemoryCandidate } from "./memory-extraction";
+import { normalizeFutureIntentCreationCandidate, type ExtractedMemoryCandidate } from "./memory-extraction";
 import type { FutureIntentMeta, MemoryEntry } from "./memory-types";
 import type { ContentAppId } from "./settings-types";
 
@@ -35,8 +35,9 @@ export type FutureIntentDetectionResult = {
     reason?: string;
 };
 
-const FUTURE_TIME_PATTERN = /今天(?:晚上|晚|下午|傍晚|夜里)?|今晚|明(?:天|早|晚)|后天|这周|本周|周[一二三四五六日天]|周末|下周|月底|下个月|生日|纪念日|以后|到时候/u;
-const FUTURE_INTENT_ACTION_PATTERN = /记得|别忘了|约好|答应|说好了|一起|计划|准备|想|希望|想要|一定会|陪|承诺|安排|约|见面|吃饭|看电影|叫我|叫你|提醒我|提醒|通知我|通知|到点/u;
+const FUTURE_TIME_PATTERN = /今天(?:晚上|晚|下午|傍晚|夜里)?|今晚|明(?:天|早|晚)|后天|这周|本周|周[一二三四五六日天]|周末|下周|月底|下个月|生日|纪念日|以后|到时候|下次|改天|有空|等你回来|等我忙完|忙完以后|毕业以后|回来以后|哪天/u;
+const FUTURE_INTENT_ACTION_PATTERN = /记得|别忘了|约好|答应|说好了|一起|计划|准备|希望|想要|一定会|陪|承诺|安排|约|见面|吃饭|看电影|叫我|叫你|提醒我|提醒|通知我|通知|到点|带你|旅行|找你/u;
+const FUTURE_INTENT_QUERY_PATTERN = /(?:想知道|想问|请问|什么意思|怎么(?:办|做|理解)|为什么|是否|吗[？?]?$)/u;
 const MEMORY_MOODS = new Set([
     "neutral", "happy", "tender", "excited", "sad", "angry", "anxious",
     "afraid", "jealous", "embarrassed", "lonely", "nostalgic",
@@ -133,9 +134,8 @@ function sanitizeFutureIntent(value: unknown): FutureIntentMeta {
 /** Cheap local gate: it decides whether asking the model is worthwhile. */
 export function hasFutureIntentSignal(text: string): boolean {
     const normalized = String(text ?? "").replace(/\s+/g, "");
-    return normalized.length > 0
-        && FUTURE_TIME_PATTERN.test(normalized)
-        && FUTURE_INTENT_ACTION_PATTERN.test(normalized);
+    if (!normalized || FUTURE_INTENT_QUERY_PATTERN.test(normalized)) return false;
+    return FUTURE_TIME_PATTERN.test(normalized) && FUTURE_INTENT_ACTION_PATTERN.test(normalized);
 }
 
 export function buildFutureIntentPrompt(
@@ -412,20 +412,21 @@ export function buildFutureIntentMemoryEntry(
     candidate: ExtractedMemoryCandidate,
     now = new Date(),
 ): MemoryEntry {
+    const creationCandidate = normalizeFutureIntentCreationCandidate(candidate);
     const sourceSignature = `${characterId}:${event.sourceApp}:${event.id}`;
     return {
         id: `mem_lt_future_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         characterId,
         sourceApp: event.sourceApp,
         type: "long_term",
-        content: candidate.content,
-        importance: clamp(candidate.importance, 0, 1),
+        content: creationCandidate.content,
+        importance: clamp(creationCandidate.importance, 0, 1),
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
-        tags: [...candidate.tags],
-        ...(candidate.mood ? { mood: candidate.mood } : {}),
+        tags: [...creationCandidate.tags],
+        ...(creationCandidate.mood ? { mood: creationCandidate.mood } : {}),
         kind: "future_intent",
-        futureIntent: candidate.futureIntent ? { ...candidate.futureIntent, status: "pending" } : {
+        futureIntent: creationCandidate.futureIntent ? { ...creationCandidate.futureIntent } : {
             type: "expectation",
             status: "pending",
             timePrecision: "unknown",

@@ -172,7 +172,7 @@ export const DEFAULT_SUMMARIZATION_PROMPT = `你是一个记忆整理助手。�
 - 保留人名、地名、时间、数字、明确承诺、关系变化和用户稳定事实
 - 每条记忆包含 2-6 个短标签，并动态判断 importance
 - kind 只能是 event、relationship、user_fact、self_fact、knowledge、future_intent
-- future_intent 必须附带 futureIntent，分类为 plan、promise、goal、wish 或 expectation
+- future_intent 必须附带 futureIntent，分类为 plan、promise、goal、wish 或 expectation；新建时 status 只能是 pending
 - 如果能准确对应事件，只把事件文本中的 [event_ref=...] 填入 sourceEventRefs，不要编造引用
 - 最多输出 8 条；没有值得长期保存的内容时输出空数组
 - 严格只输出 JSON，不要 Markdown、标题或解释文字

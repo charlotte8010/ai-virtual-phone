@@ -1,7 +1,14 @@
-import type { FutureIntentEvent } from "./future-intent-detector";
+import { normalizeFutureIntentCandidate, type FutureIntentEvent, type MemoryTimeContext } from "./future-intent-detector";
+import type { ExtractedMemoryCandidate } from "./memory-extraction";
 import type { FutureIntentMeta, MemoryEntry } from "./memory-types";
 
 export type FutureIntentLifecycleAction = "none" | "overdue" | "fulfilled" | "cancelled" | "replaced";
+
+export type FutureIntentLifecycleSemanticDecision =
+    | { action: "none" }
+    | { action: "fulfilled" }
+    | { action: "cancelled" }
+    | { action: "replaced"; replacement: ExtractedMemoryCandidate };
 
 export type FutureIntentLifecycleDecision = {
     action: FutureIntentLifecycleAction;
@@ -10,9 +17,35 @@ export type FutureIntentLifecycleDecision = {
     replacementEntry?: MemoryEntry;
 };
 
+export type FutureIntentLifecycleCandidate = {
+    ref: `F${number}`;
+    content: string;
+    sourceApp: MemoryEntry["sourceApp"];
+    type: FutureIntentMeta["type"];
+    status: "pending" | "overdue";
+    timePrecision?: FutureIntentMeta["timePrecision"];
+    targetAt?: string;
+    targetEndAt?: string;
+    timezone?: string;
+    originalTimeExpression?: string;
+};
+
+export type FutureIntentLifecycleModelDecision =
+    | { action: "none" }
+    | { action: "fulfilled" | "cancelled"; targetIndex: number }
+    | { action: "replaced"; targetIndex: number; replacement: ExtractedMemoryCandidate };
+
+export type FutureIntentLifecycleClassifier = (
+    event: FutureIntentEvent,
+    candidates: readonly FutureIntentLifecycleCandidate[],
+    timeContext: MemoryTimeContext,
+) => Promise<FutureIntentLifecycleModelDecision | null>;
+
 export type FutureIntentLifecycleOptions = {
     now?: Date;
     timezone?: string;
+    classifier?: FutureIntentLifecycleClassifier;
+    semanticDecision?: FutureIntentLifecycleSemanticDecision;
 };
 
 export type FutureIntentLifecycleStore = {
@@ -31,25 +64,7 @@ export type FutureIntentLifecycleRunResult = {
 };
 
 const TERMINAL_STATUSES = new Set<FutureIntentMeta["status"]>(["fulfilled", "cancelled"]);
-const RESCHEDULE_PATTERN = /(?:改到|改为|改成|挪到|推迟到|延期到|顺延到|换到|改约到)/u;
-const FULFILMENT_PATTERN = /(?:完成了?|做完了?|办完了?|搞定了?|已经.{0,8}(?:看完|看了|去了|去过|见面|见了|吃完|吃了)|.{0,8}(?:看完了|看了|去了|去过|见面了|见了|吃完了|吃过了))/u;
-const CANCELLATION_PATTERN = /(?:取消|不去了?|不去啦|不去喽|不做了?|不用做了|不用了|算了|放弃|作废|不再.{0,4}(?:做|去|安排|执行))/u;
-const RELATION_STOP_WORDS = [
-    "明天", "明早", "明晚", "后天", "今天", "今晚", "这周", "本周", "下周", "周末",
-    "以后", "到时候", "一起", "已经", "完成", "做完", "办完", "搞定", "取消", "那个",
-    "这件事", "计划", "改到", "改为", "改成", "挪到", "推迟到", "延期到", "顺延到", "换到",
-    "改约到", "看完", "去了", "去过", "见面", "见了", "吃完", "吃过", "不去了", "不做了",
-    "不用了", "算了", "了", "的", "和", "跟", "去", "看", "做", "我", "你", "我们",
-];
-const RELATION_STOP_PATTERN = new RegExp(RELATION_STOP_WORDS.map(escapeRegExp).join("|"), "gu");
-const CHINESE_HOUR_VALUES: Record<string, number> = {
-    零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
-};
-const WEEKDAY_VALUES: Record<string, number> = { 日: 6, 天: 6, 一: 0, 二: 1, 三: 2, 四: 3, 五: 4, 六: 5 };
-
-function escapeRegExp(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-}
+const MAX_CLASSIFIER_CANDIDATES = 32;
 
 function isValidTimeZone(value: string | undefined): value is string {
     if (!value) return false;
@@ -91,23 +106,6 @@ function getCalendarDayKey(value: Date, timezone: string): string | undefined {
 
 function temporalPrecision(intent: FutureIntentMeta): string {
     return intent.timePrecision || (intent.targetEndAt ? "range" : "exact");
-}
-
-function hasIntentRelation(intentContent: string, eventContent: string): boolean {
-    const normalize = (value: string): string => value
-        .normalize("NFKC")
-        .toLocaleLowerCase()
-        .replace(RELATION_STOP_PATTERN, "")
-        .replace(/[^\p{L}\p{N}]+/gu, "");
-    const left = normalize(intentContent);
-    const right = normalize(eventContent);
-    if (left.length < 2 || right.length < 2) return false;
-    if (left.includes(right) || right.includes(left)) return true;
-    const leftBigrams = new Set<string>();
-    const rightBigrams = new Set<string>();
-    for (let index = 0; index < left.length - 1; index += 1) leftBigrams.add(left.slice(index, index + 2));
-    for (let index = 0; index < right.length - 1; index += 1) rightBigrams.add(right.slice(index, index + 2));
-    return [...leftBigrams].some(value => rightBigrams.has(value));
 }
 
 function lifecycleEventIds(entry: MemoryEntry): string[] {
@@ -177,189 +175,43 @@ function buildReplacementId(): string {
     return `mem_lt_future_replace_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function getTimeZoneOffsetMillis(value: Date, timezone: string): number | undefined {
-    try {
-        const parts = new Intl.DateTimeFormat("en-US", {
-            timeZone: timezone,
-            timeZoneName: "longOffset",
-        }).formatToParts(value);
-        const name = parts.find(part => part.type === "timeZoneName")?.value;
-        if (!name || name === "GMT") return 0;
-        const match = name.match(/^GMT([+-])(\d{2}):?(\d{2})$/u);
-        if (!match) return undefined;
-        const minutes = Number(match[2]) * 60 + Number(match[3]);
-        return (match[1] === "+" ? 1 : -1) * minutes * 60 * 1000;
-    } catch {
-        return undefined;
-    }
-}
-
-function zonedDateToIso(
-    parts: { year: number; month: number; day: number; hour: number; minute: number },
-    timezone: string,
-): string | undefined {
-    if (!isValidTimeZone(timezone)) return undefined;
-    let guess = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
-    for (let index = 0; index < 3; index += 1) {
-        const offset = getTimeZoneOffsetMillis(new Date(guess), timezone);
-        if (offset === undefined) return undefined;
-        guess = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute) - offset;
-    }
-    return new Date(guess).toISOString();
-}
-
-function getZonedDateParts(value: Date, timezone: string): { year: number; month: number; day: number; weekday: number } | undefined {
-    if (!isValidTimeZone(timezone)) return undefined;
-    try {
-        const parts = new Intl.DateTimeFormat("en-US", {
-            timeZone: timezone,
-            year: "numeric",
-            month: "numeric",
-            day: "numeric",
-            weekday: "short",
-        }).formatToParts(value);
-        const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
-        const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(values.weekday);
-        return {
-            year: Number(values.year),
-            month: Number(values.month),
-            day: Number(values.day),
-            weekday: weekday >= 0 ? weekday : 0,
-        };
-    } catch {
-        return undefined;
-    }
-}
-
-function addCalendarDays(value: { year: number; month: number; day: number }, days: number): { year: number; month: number; day: number } {
-    const date = new Date(Date.UTC(value.year, value.month - 1, value.day + days));
-    return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
-}
-
-function parseChineseNumber(value: string): number | undefined {
-    if (/^\d+$/u.test(value)) return Number(value);
-    if (value.length === 1) return CHINESE_HOUR_VALUES[value];
-    if (value === "十") return 10;
-    if (value.startsWith("十")) return 10 + (CHINESE_HOUR_VALUES[value.slice(1)] ?? 0);
-    if (value.endsWith("十")) return (CHINESE_HOUR_VALUES[value.slice(0, -1)] ?? 0) * 10;
-    if (value.length === 3 && value[1] === "十") {
-        return (CHINESE_HOUR_VALUES[value[0]] ?? 0) * 10 + (CHINESE_HOUR_VALUES[value[2]] ?? 0);
-    }
-    return undefined;
-}
-
-function parseClock(value: string): { hour: number; minute: number } | undefined {
-    const match = value.match(/(凌晨|早上|早晨|上午|中午|下午|晚上|晚间|今晚)?\s*(\d{1,2}|[零一二三四五六七八九十两]+)(?:(?:[：:]\s*(\d{1,2}))|(?:\s*点\s*(\d{1,2})?))/u);
-    if (!match) return undefined;
-    let hour = parseChineseNumber(match[2]);
-    if (hour === undefined || hour > 23) return undefined;
-    const minute = Number(match[3] ?? match[4] ?? 0);
-    if (!Number.isFinite(minute) || minute > 59) return undefined;
-    if (["下午", "晚上", "晚间", "今晚"].includes(match[1] ?? "") && hour < 12) hour += 12;
-    if (match[1] === "中午" && hour < 11) hour += 12;
-    return { hour, minute };
-}
-
-type ReplacementTime = {
-    targetAt: string;
-    timePrecision: "exact" | "day";
-    originalTimeExpression: string;
-};
-
-function parseReplacementTime(event: FutureIntentEvent, timezone: string | undefined): ReplacementTime | undefined {
-    const content = event.content;
-    const absolute = content.match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[T\s]+\d{1,2}(?::|：)\d{2})?(?:Z|[+-]\d{2}:?\d{2})?/u);
-    if (absolute) {
-        const expression = absolute[0].replace(/\//gu, "-");
-        const hasClock = /(?:T|\s)\d{1,2}(?::|：)\d{2}/u.test(expression);
-        if (/[+-]\d{2}:?\d{2}$|Z$/u.test(expression)) {
-            const parsed = parseDate(expression.replace(" ", "T"));
-            if (parsed) return { targetAt: parsed.toISOString(), timePrecision: hasClock ? "exact" : "day", originalTimeExpression: absolute[0] };
-        }
-        const parts = expression.match(/(\d{4})-(\d{1,2})-(\d{1,2})(?:T|\s+)?(?:(\d{1,2})(?::|：)(\d{2}))?/u);
-        if (!parts || !isValidTimeZone(timezone)) return undefined;
-        const hour = parts[4] === undefined ? 0 : Number(parts[4]);
-        const minute = parts[5] === undefined ? 0 : Number(parts[5]);
-        const targetAt = zonedDateToIso({ year: Number(parts[1]), month: Number(parts[2]), day: Number(parts[3]), hour, minute }, timezone);
-        if (!targetAt) return undefined;
-        return { targetAt, timePrecision: hasClock ? "exact" : "day", originalTimeExpression: absolute[0] };
-    }
-
-    const chineseAbsolute = content.match(/\d{4}年\d{1,2}月\d{1,2}日[^，。；;！!\n]*/u);
-    if (chineseAbsolute) {
-        const parts = chineseAbsolute[0].match(/(\d{4})年(\d{1,2})月(\d{1,2})日/u);
-        if (!parts || !isValidTimeZone(timezone)) return undefined;
-        const clock = parseClock(chineseAbsolute[0].split("日").slice(1).join("日"));
-        const targetAt = zonedDateToIso({
-            year: Number(parts[1]), month: Number(parts[2]), day: Number(parts[3]), hour: clock?.hour ?? 0, minute: clock?.minute ?? 0,
-        }, timezone);
-        if (!targetAt) return undefined;
-        return { targetAt, timePrecision: clock ? "exact" : "day", originalTimeExpression: chineseAbsolute[0].trim() };
-    }
-
-    const relative = content.match(/(?:大后天|后天|明早|明晚|明天|(?:下周|下星期|下礼拜|这周|本周)?(?:周)?[一二三四五六日天])[^，。；;！!\n]*/u);
-    if (!relative || !isValidTimeZone(timezone)) return undefined;
-    const base = parseDate(event.timestamp);
-    const baseParts = base ? getZonedDateParts(base, timezone) : undefined;
-    if (!baseParts) return undefined;
-    const expression = relative[0].trim();
-    const clock = parseClock(expression);
-    let targetDay: { year: number; month: number; day: number };
-    if (expression.startsWith("大后天")) {
-        targetDay = addCalendarDays(baseParts, 3);
-    } else if (expression.startsWith("后天")) {
-        targetDay = addCalendarDays(baseParts, 2);
-    } else if (/^明(?:早|晚|天)/u.test(expression)) {
-        targetDay = addCalendarDays(baseParts, 1);
-    } else {
-        const weekdayMatch = expression.match(/^(下周|下星期|下礼拜|这周|本周)?(?:周)?([一二三四五六日天])/u);
-        if (!weekdayMatch) return undefined;
-        const targetWeekday = WEEKDAY_VALUES[weekdayMatch[2]];
-        const currentMondayIndex = (baseParts.weekday + 6) % 7;
-        const delta = weekdayMatch[1] && ["下周", "下星期", "下礼拜"].includes(weekdayMatch[1])
-            ? 7 - currentMondayIndex + targetWeekday
-            : Math.max(0, targetWeekday - currentMondayIndex);
-        targetDay = addCalendarDays(baseParts, delta);
-    }
-    const targetAt = zonedDateToIso({
-        ...targetDay,
-        hour: clock?.hour ?? 0,
-        minute: clock?.minute ?? 0,
-    }, timezone);
-    if (!targetAt) return undefined;
-    return { targetAt, timePrecision: clock ? "exact" : "day", originalTimeExpression: expression };
-}
-
 function createReplacementEntry(
     entry: MemoryEntry,
     event: FutureIntentEvent,
-    replacementTime: ReplacementTime,
+    replacement: ExtractedMemoryCandidate,
     replacementId: string,
     at: Date,
-): MemoryEntry {
-    const currentIntent = entry.futureIntent!;
+): MemoryEntry | undefined {
+    const replacementIntent = replacement.futureIntent;
+    if (!replacementIntent || replacement.kind !== "future_intent") return undefined;
     const sourceSignature = `${entry.characterId}:${event.sourceApp}:${event.id}`;
+    const tags = replacement.tags.length > 0 ? [...replacement.tags] : entry.tags ? [...entry.tags] : undefined;
     const futureIntent: FutureIntentMeta = {
-        type: currentIntent.type,
+        ...replacementIntent,
         status: "pending",
-        timePrecision: replacementTime.timePrecision,
-        targetAt: replacementTime.targetAt,
-        timezone: currentIntent.timezone,
-        originalTimeExpression: replacementTime.originalTimeExpression,
+        fulfilledAt: undefined,
+        cancelledAt: undefined,
+        replacedByMemoryId: undefined,
     };
     return {
-        ...entry,
         id: replacementId,
-        content: event.content.trim().slice(0, 2000),
+        characterId: entry.characterId,
+        sourceApp: event.sourceApp,
+        type: "long_term",
+        content: replacement.content,
+        importance: replacement.importance,
         createdAt: at.toISOString(),
         updatedAt: at.toISOString(),
-        sourceMessageIds: [event.id],
-        embedding: undefined,
+        ...(tags ? { tags } : {}),
+        ...(replacement.mood ? { mood: replacement.mood } : {}),
+        kind: "future_intent",
         futureIntent,
+        sourceMessageIds: [event.id],
         metadata: {
-            ...(entry.metadata ?? {}),
             sourceEventSignatures: [sourceSignature],
             sourceEventTimestamps: [event.timestamp],
+            ...(event.sessionId ? { sourceSessionIds: [event.sessionId] } : {}),
+            extractionVersion: "future-intent-lifecycle-v2",
             extractionMode: "future_intent_lifecycle_replacement",
             futureIntentLifecycleEventIds: [event.id],
             futureIntentLifecycle: {
@@ -429,38 +281,306 @@ export function decideFutureIntentTransition(
     const eventTime = parseDate(event.timestamp);
     if (!eventTime) return { action: "none", reason: "invalid_event_time" };
 
-    const related = hasIntentRelation(entry.content, event.content);
-    const hasFulfilment = FULFILMENT_PATTERN.test(event.content);
-    const hasCancellation = CANCELLATION_PATTERN.test(event.content);
-    const hasReschedule = RESCHEDULE_PATTERN.test(event.content);
-    const eventKinds = Number(hasFulfilment) + Number(hasCancellation) + Number(hasReschedule);
-    if (related && eventKinds > 1) return { action: "none", reason: "conflicting_event_evidence" };
-
-    if (related && hasReschedule) {
-        const replacementTime = parseReplacementTime(event, options.timezone || intent.timezone);
-        if (!replacementTime) return { action: "none", reason: "replacement_time_unresolved" };
-        const replacementId = buildReplacementId();
-        const replacementEntry = createReplacementEntry(entry, event, replacementTime, replacementId, eventTime);
-        const nextEntry = buildTerminalEntry(entry, event, "cancelled", eventTime);
-        nextEntry.futureIntent = { ...nextEntry.futureIntent!, replacedByMemoryId: replacementId };
-        return { action: "replaced", reason: "explicit_reschedule", nextEntry, replacementEntry };
-    }
-    if (related && hasFulfilment) {
-        return {
-            action: "fulfilled",
-            reason: "explicit_completion_evidence",
-            nextEntry: buildTerminalEntry(entry, event, "fulfilled", eventTime),
-        };
-    }
-    if (related && hasCancellation) {
-        return {
-            action: "cancelled",
-            reason: "explicit_cancellation_evidence",
-            nextEntry: buildTerminalEntry(entry, event, "cancelled", eventTime),
-        };
+    const semanticDecision = options.semanticDecision;
+    if (semanticDecision && semanticDecision.action !== "none") {
+        if (semanticDecision.action === "fulfilled" || semanticDecision.action === "cancelled") {
+            return {
+                action: semanticDecision.action,
+                reason: semanticDecision.action === "fulfilled"
+                    ? "classifier_completion_evidence"
+                    : "classifier_cancellation_evidence",
+                nextEntry: buildTerminalEntry(entry, event, semanticDecision.action, eventTime),
+            };
+        }
+        const replacementEntry = createReplacementEntry(
+            entry,
+            event,
+            semanticDecision.replacement,
+            buildReplacementId(),
+            eventTime,
+        );
+        if (replacementEntry) {
+            const nextEntry = buildTerminalEntry(entry, event, "cancelled", eventTime);
+            nextEntry.futureIntent = { ...nextEntry.futureIntent!, replacedByMemoryId: replacementEntry.id };
+            return { action: "replaced", reason: "classifier_reschedule_evidence", nextEntry, replacementEntry };
+        }
     }
 
     return decideFutureIntentTimeTransition(entry, options.now ?? eventTime, options.timezone);
+}
+
+function normalizedText(value: string): string {
+    return value.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function buildTextNgrams(value: string): Set<string> {
+    if (value.length <= 3) return value ? new Set([value]) : new Set();
+    const result = new Set<string>();
+    for (let index = 0; index <= value.length - 3; index += 1) result.add(value.slice(index, index + 3));
+    return result;
+}
+
+function candidateHeuristicScore(entry: MemoryEntry, event: FutureIntentEvent): number {
+    let score = 0;
+    if (entry.sourceApp === event.sourceApp) score += 2;
+    const sessionIds = readStringArray(entry.metadata?.sourceSessionIds);
+    if (event.sessionId && sessionIds.includes(event.sessionId)) score += 8;
+    const left = buildTextNgrams(normalizedText(entry.content));
+    const right = buildTextNgrams(normalizedText(event.content));
+    if (left.size > 0 && right.size > 0) {
+        const overlap = [...left].filter(gram => right.has(gram)).length;
+        score += Math.min(6, overlap);
+    }
+    const target = parseDate(entry.futureIntent?.targetEndAt || entry.futureIntent?.targetAt);
+    const eventTime = parseDate(event.timestamp);
+    if (target && eventTime) {
+        const days = Math.abs(target.getTime() - eventTime.getTime()) / 86_400_000;
+        score += Math.max(0, 4 - Math.min(4, days / 7));
+    }
+    if (entry.futureIntent?.status === "overdue") score += 1;
+    return score;
+}
+
+function candidateFromEntry(entry: MemoryEntry, ref: `F${number}`): FutureIntentLifecycleCandidate | undefined {
+    const intent = entry.futureIntent;
+    if (!intent || (intent.status !== "pending" && intent.status !== "overdue") || intent.replacedByMemoryId) return undefined;
+    return {
+        ref,
+        content: entry.content,
+        sourceApp: entry.sourceApp,
+        type: intent.type,
+        status: intent.status,
+        ...(intent.timePrecision ? { timePrecision: intent.timePrecision } : {}),
+        ...(intent.targetAt ? { targetAt: intent.targetAt } : {}),
+        ...(intent.targetEndAt ? { targetEndAt: intent.targetEndAt } : {}),
+        ...(intent.timezone ? { timezone: intent.timezone } : {}),
+        ...(intent.originalTimeExpression ? { originalTimeExpression: intent.originalTimeExpression } : {}),
+    };
+}
+
+type CandidateBinding = {
+    entry: MemoryEntry;
+    candidate: FutureIntentLifecycleCandidate;
+};
+
+function buildCandidateBindings(entries: MemoryEntry[], event: FutureIntentEvent): CandidateBinding[] {
+    const eligible = entries
+        .map(entry => ({ entry, candidate: candidateFromEntry(entry, "F0" as `F${number}`) }))
+        .filter((item): item is { entry: MemoryEntry; candidate: FutureIntentLifecycleCandidate } => Boolean(item.candidate));
+    const selected = eligible.length <= MAX_CLASSIFIER_CANDIDATES
+        ? eligible
+        : [...eligible]
+            .sort((left, right) => candidateHeuristicScore(right.entry, event) - candidateHeuristicScore(left.entry, event))
+            .slice(0, MAX_CLASSIFIER_CANDIDATES);
+    return selected.map((item, index) => ({
+        entry: item.entry,
+        candidate: { ...item.candidate, ref: `F${index}` as `F${number}` },
+    }));
+}
+
+export function buildFutureIntentLifecycleCandidates(
+    entries: MemoryEntry[],
+    event: FutureIntentEvent,
+): FutureIntentLifecycleCandidate[] {
+    return buildCandidateBindings(entries, event).map(item => item.candidate);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+    const allowedSet = new Set(allowed);
+    return Object.keys(value).every(key => allowedSet.has(key));
+}
+
+function readNonEmptyString(value: unknown, maxLength: number): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    return trimmed ? trimmed.slice(0, maxLength) : undefined;
+}
+
+function hasDuplicateObjectKeys(text: string): boolean {
+    const stack: Set<string>[] = [];
+    for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (char === '"') {
+            const start = index;
+            let escaped = false;
+            index += 1;
+            for (; index < text.length; index += 1) {
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                if (text[index] === "\\") {
+                    escaped = true;
+                    continue;
+                }
+                if (text[index] === '"') break;
+            }
+            const afterString = text.slice(index + 1).match(/^\s*:/u);
+            if (afterString && stack.length > 0) {
+                let key: string;
+                try {
+                    key = JSON.parse(text.slice(start, index + 1)) as string;
+                } catch {
+                    return true;
+                }
+                const current = stack[stack.length - 1];
+                if (current.has(key)) return true;
+                current.add(key);
+            }
+            continue;
+        }
+        if (char === "{") stack.push(new Set());
+        else if (char === "}") stack.pop();
+    }
+    return false;
+}
+
+function parseTargetIndex(value: unknown, candidates: readonly FutureIntentLifecycleCandidate[]): number | undefined {
+    if (typeof value !== "string" || !/^F(?:0|[1-9]\d*)$/u.test(value)) return undefined;
+    const index = Number(value.slice(1));
+    return candidates[index]?.ref === value ? index : undefined;
+}
+
+function isValidDateString(value: unknown): value is string {
+    return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function parseReplacementCandidate(
+    value: unknown,
+    timeContext: MemoryTimeContext,
+): ExtractedMemoryCandidate | undefined {
+    if (!isRecord(value) || !hasOnlyKeys(value, ["content", "type", "timePrecision", "targetAt", "targetEndAt", "timezone", "originalTimeExpression"])) {
+        return undefined;
+    }
+    const content = readNonEmptyString(value.content, 2000);
+    const originalTimeExpression = readNonEmptyString(value.originalTimeExpression, 200);
+    const types = new Set(["plan", "promise", "goal", "wish", "expectation"]);
+    const precisions = new Set(["exact", "day", "range", "vague", "unknown"]);
+    if (!content || !originalTimeExpression || typeof value.type !== "string" || !types.has(value.type)
+        || typeof value.timePrecision !== "string" || !precisions.has(value.timePrecision)) return undefined;
+
+    const precision = value.timePrecision;
+    const targetAt = value.targetAt;
+    const targetEndAt = value.targetEndAt;
+    if (["exact", "day", "range"].includes(precision)) {
+        if (!isValidDateString(targetAt)) return undefined;
+        if (precision === "range" && (!isValidDateString(targetEndAt) || Date.parse(targetEndAt) < Date.parse(targetAt))) return undefined;
+        if (precision !== "range" && targetEndAt !== undefined) return undefined;
+    } else if (targetAt !== undefined || targetEndAt !== undefined) {
+        return undefined;
+    }
+    if (value.timezone !== undefined && (typeof value.timezone !== "string" || !isValidTimeZone(value.timezone))) return undefined;
+
+    const normalized = normalizeFutureIntentCandidate({
+        content,
+        tags: [],
+        importance: 0.5,
+        kind: "future_intent",
+        futureIntent: {
+            type: value.type as FutureIntentMeta["type"],
+            status: "pending",
+            timePrecision: precision as NonNullable<FutureIntentMeta["timePrecision"]>,
+            ...(targetAt !== undefined ? { targetAt: targetAt as string } : {}),
+            ...(targetEndAt !== undefined ? { targetEndAt: targetEndAt as string } : {}),
+            ...(value.timezone !== undefined ? { timezone: value.timezone as string } : {}),
+            originalTimeExpression,
+        },
+    }, timeContext);
+    if (!normalized?.futureIntent || normalized.futureIntent.timePrecision !== precision) return undefined;
+    if (["exact", "day", "range"].includes(precision) && normalized.futureIntent.targetAt !== targetAt) return undefined;
+    if (precision === "range" && normalized.futureIntent.targetEndAt !== targetEndAt) return undefined;
+    return normalized;
+}
+
+/** Build the only prompt used for lifecycle semantic classification. */
+export function buildFutureIntentLifecyclePrompt(
+    event: FutureIntentEvent,
+    timeContext: MemoryTimeContext,
+    candidates: readonly FutureIntentLifecycleCandidate[],
+): string {
+    const timezone = timeContext.timezone?.trim() || "未提供";
+    const candidateText = candidates.length === 0
+        ? "（没有未解决候选）"
+        : candidates.map(candidate => [
+            `[${candidate.ref}]`,
+            `content=${candidate.content}`,
+            `source_app=${candidate.sourceApp}`,
+            `type=${candidate.type}`,
+            `status=${candidate.status}`,
+            `time_precision=${candidate.timePrecision || "unknown"}`,
+            candidate.targetAt ? `target_at=${candidate.targetAt}` : "",
+            candidate.targetEndAt ? `target_end_at=${candidate.targetEndAt}` : "",
+            candidate.timezone ? `timezone=${candidate.timezone}` : "",
+            candidate.originalTimeExpression ? `original_time=${candidate.originalTimeExpression}` : "",
+        ].filter(Boolean).join(" ")).join("\n");
+    return [
+        "你是 Future Intent lifecycle classifier。",
+        `当前参考时间：${timeContext.now.toISOString()}`,
+        `角色时区：${timezone}`,
+        "只判断当前 exact event，不要猜测整个历史。",
+        "必须有明确语义证据；主题相似不等于同一计划，关键词重叠不等于同一计划。",
+        "综合人物、对象、行为、时间、地点等信息；多个相似候选时只能选择事件明确指向的那个。",
+        "无法唯一确认时输出 none。疑问句、假设、猜测、建议、条件句都不能推进 lifecycle。",
+        "targetAt 已经过期不代表 fulfilled；overdue 由代码按时间规则处理。",
+        "只能输出 action=none、fulfilled、cancelled、replaced；不能输出 overdue。",
+        "候选引用只允许使用 F0/F1/...，不允许返回真实 memory ID 或候选列表之外的 ID。",
+        "宁可 none，不要猜。只输出 JSON，不要 explanation。",
+        "未解决 Future Intent 候选：",
+        candidateText,
+        "当前 exact native event：",
+        `<native_event>[event_ref=${event.id}] [source_app=${event.sourceApp}] [source_detail=${event.sourceDetail || ""}] [event_time=${event.timestamp}] ${event.content}</native_event>`,
+        "输出格式：{\"action\":\"none\"}，或 {\"action\":\"fulfilled\",\"target\":\"F1\"}，或 {\"action\":\"cancelled\",\"target\":\"F1\"}，或 {\"action\":\"replaced\",\"target\":\"F1\",\"replacement\":{\"content\":\"...\",\"type\":\"plan\",\"timePrecision\":\"exact\",\"targetAt\":\"...\",\"originalTimeExpression\":\"...\"}}。",
+    ].join("\n");
+}
+
+/** Parse the strict classifier contract; malformed or ambiguous output is a no-op. */
+export function parseFutureIntentLifecycleModelOutput(
+    text: string,
+    candidates: readonly FutureIntentLifecycleCandidate[],
+    timeContext: MemoryTimeContext,
+): FutureIntentLifecycleModelDecision | null {
+    const source = text.trim();
+    if (!source || hasDuplicateObjectKeys(source)) return null;
+    let value: unknown;
+    try {
+        value = JSON.parse(source) as unknown;
+    } catch {
+        return null;
+    }
+    if (!isRecord(value) || typeof value.action !== "string") return null;
+    if (value.action === "none") return hasOnlyKeys(value, ["action"]) ? { action: "none" } : null;
+    if (value.action !== "fulfilled" && value.action !== "cancelled" && value.action !== "replaced") return null;
+    if (!hasOnlyKeys(value, value.action === "replaced" ? ["action", "target", "replacement"] : ["action", "target"])) return null;
+    const targetIndex = parseTargetIndex(value.target, candidates);
+    if (targetIndex === undefined) return null;
+    if (value.action !== "replaced") return { action: value.action, targetIndex };
+    const replacement = parseReplacementCandidate(value.replacement, timeContext);
+    return replacement ? { action: "replaced", targetIndex, replacement } : null;
+}
+
+async function classifyWithMemorySummaryApi(
+    event: FutureIntentEvent,
+    candidates: readonly FutureIntentLifecycleCandidate[],
+    timeContext: MemoryTimeContext,
+): Promise<FutureIntentLifecycleModelDecision | null> {
+    if (typeof window === "undefined") return null;
+    const [{ resolveAuxiliaryApiConfig }, { simpleLLMCall }] = await Promise.all([
+        import("./settings-storage"),
+        import("./api-helpers"),
+    ]);
+    const apiConfig = resolveAuxiliaryApiConfig("memorySummaryApiConfigId");
+    if (!apiConfig) return null;
+    const result = await simpleLLMCall(
+        apiConfig,
+        [{ role: "user", content: buildFutureIntentLifecyclePrompt(event, timeContext, candidates) }],
+        { temperature: 0, max_tokens: 700 },
+    );
+    if (!result.content || result.wasTruncated) return null;
+    return parseFutureIntentLifecycleModelOutput(result.content, candidates, timeContext);
 }
 
 async function resolveLifecycleStore(store?: FutureIntentLifecycleStore): Promise<FutureIntentLifecycleStore> {
@@ -500,22 +620,44 @@ export async function runFutureIntentLifecycle(
     if (store.loadMemoryConfig?.().futureIntentEnabled === false) return { status: "disabled" };
     const timezone = await resolveCharacterTimezone(characterId, options.timezone);
     const entries = await store.loadMemoryEntriesByType(characterId, "long_term");
-    const decisions: FutureIntentLifecycleDecision[] = [];
+    const bindings = buildCandidateBindings(entries, event);
+    const eventTime = parseDate(event.timestamp);
+    const referenceNow = options.now && Number.isFinite(options.now.getTime())
+        ? options.now
+        : eventTime || new Date();
+    let modelDecision: FutureIntentLifecycleModelDecision | null = null;
+    if (bindings.length > 0) {
+        const classifier = options.classifier || classifyWithMemorySummaryApi;
+        try {
+            modelDecision = await classifier(event, bindings.map(item => item.candidate), { now: referenceNow, timezone });
+        } catch (error) {
+            console.warn("[FutureIntentLifecycle] Semantic classifier failed; continuing with time maintenance", error);
+        }
+    }
+    const targetBinding = modelDecision && modelDecision.action !== "none"
+        && Number.isInteger(modelDecision.targetIndex)
+        ? bindings[modelDecision.targetIndex]
+        : undefined;
     const changedEntries: MemoryEntry[] = [];
+    const decisions: FutureIntentLifecycleDecision[] = [];
     let eventActionApplied = false;
-    let replacementCreated = false;
     for (const entry of entries) {
-        const decision = decideFutureIntentTransition(entry, event, { ...options, timezone });
+        const semanticDecision = targetBinding?.entry.id === entry.id && modelDecision && modelDecision.action !== "none"
+            ? modelDecision.action === "replaced"
+                ? { action: "replaced" as const, replacement: modelDecision.replacement }
+                : { action: modelDecision.action }
+            : undefined;
+        const decision = decideFutureIntentTransition(entry, event, {
+            now: options.now,
+            timezone,
+            semanticDecision,
+        });
         if (decision.action === "none" || !decision.nextEntry) continue;
         if (["fulfilled", "cancelled", "replaced"].includes(decision.action) && eventActionApplied) continue;
-        if (decision.action === "replaced" && replacementCreated) continue;
         decisions.push(decision);
         changedEntries.push(decision.nextEntry);
         if (["fulfilled", "cancelled", "replaced"].includes(decision.action)) eventActionApplied = true;
-        if (decision.replacementEntry) {
-            changedEntries.push(decision.replacementEntry);
-            replacementCreated = true;
-        }
+        if (decision.replacementEntry) changedEntries.push(decision.replacementEntry);
     }
     if (changedEntries.length === 0) return { status: "no_change" };
     try {

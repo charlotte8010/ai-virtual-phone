@@ -27,6 +27,7 @@ async function loadTypeScriptModule(relativePath) {
 const extraction = await loadTypeScriptModule("lib/memory-extraction.ts");
 const dedupe = await loadTypeScriptModule("lib/memory-dedupe.ts");
 const provenance = await loadTypeScriptModule("lib/memory-provenance.ts");
+const summarizerSource = await readFile(new URL("../lib/memory-summarizer.ts", import.meta.url), "utf8");
 
 const timelineEntries = [
     {
@@ -145,6 +146,26 @@ assert.equal(fallback.mode, "plain_text_fallback");
 assert.equal(fallback.memories.length, 1);
 assert.equal(fallback.memories[0].importance, 0.8);
 assert.equal(fallback.memories[0].kind, "event");
+
+const creationCandidate = extraction.normalizeFutureIntentCreationCandidate({
+    content: "明天一起看电影",
+    tags: ["电影"],
+    importance: 0.8,
+    kind: "future_intent",
+    futureIntent: {
+        type: "plan",
+        status: "fulfilled",
+        timePrecision: "exact",
+        targetAt: "2026-09-02T12:00:00.000Z",
+        fulfilledAt: "2026-09-02T13:00:00.000Z",
+        replacedByMemoryId: "secret-replacement",
+    },
+});
+assert.equal(creationCandidate.futureIntent.status, "pending");
+assert.equal(creationCandidate.futureIntent.fulfilledAt, undefined);
+assert.equal(creationCandidate.futureIntent.replacedByMemoryId, undefined);
+assert.match(summarizerSource, /normalizeFutureIntentCreationCandidate\(candidate\)/);
+assert.match(summarizerSource, /status 初始只能是 pending/);
 
 const existing = {
     id: "mem-1",
