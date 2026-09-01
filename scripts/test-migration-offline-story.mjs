@@ -2,14 +2,151 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { compileMigrationModules } from "./migration-ts-loader.mjs";
 
-const packagePath = "E:/OneDrive/Documents/ChatGPT/小手机/御茗_sully-to-float_no-moments_no-worldepisode_2026-09-01.float-migration.zip";
 const runtime = await compileMigrationModules();
 
 try {
   const { readFloatMigrationPackage } = runtime.requireModule("format/read-package.js");
-  const { dryRunFloatMigrationPackage } = runtime.requireModule("native/importer.js");
+  const { writeFloatMigrationPackage } = runtime.requireModule("format/package-writer.js");
+  const { dryRunFloatMigrationPackage, applyFloatMigrationPackage, rollbackFloatMigrationRun } = runtime.requireModule("native/importer.js");
 
-  const read = await readFloatMigrationPackage(await readFile(packagePath));
+  const fingerprint = `sha256:${"1".repeat(64)}`;
+  const source = (store, originalId) => ({ platform: "sully", backupFormat: "sully_v3", backupFormatVersion: 3, backupFingerprint: fingerprint, store, originalId });
+  const characters = Array.from({ length: 4 }, (_, index) => ({
+    migrationId: `mig_characters_${index}`,
+    kind: "character",
+    displayName: index === 0 ? "Synthetic Sully" : `Synthetic Character ${index}`,
+    persona: `fixture persona ${index}`,
+    source: source("characters", `char-${index}`),
+  }));
+  const character = characters[0];
+  const conversations = characters.map((entry, index) => ({
+    migrationId: `mig_conversations_${index}`,
+    characterRef: entry.migrationId,
+    source: source("messages", `char-${index}`),
+  }));
+  const conversation = conversations[0];
+  const messages = Array.from({ length: 5153 }, (_, index) => {
+    const offline = index < 445;
+    const chatIndex = index - 445;
+    const messageCharacter = offline ? character : characters[chatIndex % characters.length];
+    const messageConversation = offline ? conversation : conversations[chatIndex % conversations.length];
+    return {
+      migrationId: `mig_messages_${index}`,
+      sourceOriginalId: String(index),
+      characterRef: messageCharacter.migrationId,
+      conversationRef: messageConversation.migrationId,
+      role: offline ? (index % 2 === 0 ? "user" : "assistant") : (index % 3 === 0 ? "user" : "assistant"),
+      content: `${offline ? "offline" : "chat"} fixture message ${index}`,
+      createdAt: new Date(Date.parse("2026-08-01T00:00:00.000Z") + index * 1000).toISOString(),
+      source: source("messages", String(index)),
+      sourceMetadata: { source: offline ? "date" : "online" },
+    };
+  });
+  const stories = Array.from({ length: 193 }, (_, index) => ({
+    migrationId: `mig_vr_archive_${index}`,
+    kind: "vr_novel",
+    title: `Archived VR record ${index}`,
+    content: `archive ${index}`,
+    source: source("vrNovels", String(index)),
+  }));
+  const assets = Array.from({ length: 79 }, (_, index) => ({
+    assetId: `asset-${index}`,
+    packagePath: `assets/files/asset-${index}.bin`,
+    mediaType: "application/octet-stream",
+    byteLength: 3,
+    source: source("assets", `asset-${index}`),
+  }));
+  const diaries = [{
+    migrationId: "mig_diary_0", date: "2026-08-01", userContent: { text: "user page" },
+    characterContent: { text: "character page" }, createdAt: "2026-08-01T00:00:00.000Z",
+    source: source("diaries", "diary-0"), metadata: { charId: "char-0" },
+  }];
+  const worlds = [{
+    migrationId: "mig_world_0", title: "Synthetic world", content: "world content",
+    source: source("worlds", "world-0"), metadata: { memberIds: characters.map((_, index) => `char-${index}`) },
+  }];
+  const worldbooks = Array.from({ length: 14 }, (_, index) => ({
+    migrationId: `mig_worldbook_${index}`, title: `WorldBook ${index}`, content: `worldbook ${index}`,
+    keys: [`key-${index}`], source: source("worldbooks", `worldbook-${index}`), settings: {},
+  }));
+  const schedules = Array.from({ length: 11 }, (_, index) => ({
+    migrationId: `mig_schedule_${index}`, characterRef: character.migrationId,
+    date: `2026-08-${String(3 + (index % 3) * 7).padStart(2, "0")}`,
+    content: { slots: [{ startTime: "09:00", activity: `schedule ${index}` }] },
+    source: source("dailySchedules", `schedule-${index}`), metadata: { generatedAt: "2026-09-01T00:00:00.000Z" },
+  }));
+  const memories = [
+    ...Array.from({ length: 250 }, (_, index) => ({
+      migrationId: `mig_memory_active_${index}`, characterRef: characters[index % characters.length].migrationId,
+      content: `active memory ${index}`, createdAt: "2026-08-01T00:00:00.000Z", source: source("memoryNodes", `active-${index}`),
+    })),
+    ...Array.from({ length: 147 }, (_, index) => ({
+      migrationId: `mig_memory_archived_${index}`, characterRef: characters[index % characters.length].migrationId,
+      content: `archived memory ${index}`, archived: true, room: index < 5 ? "windowsill" : "study",
+      createdAt: "2026-08-01T00:00:00.000Z", source: source("memoryNodes", `archived-${index}`),
+    })),
+  ];
+  const futureIntents = [
+    ...Array.from({ length: 4 }, (_, index) => ({
+      migrationId: `mig_intent_active_${index}`, characterRef: characters[index % characters.length].migrationId,
+      content: `active intent ${index}`, timePrecision: "vague", sourceMemoryRef: `mig_memory_active_${index}`,
+      source: source("memoryNodes", `active-${index}`),
+    })),
+    ...Array.from({ length: 5 }, (_, index) => ({
+      migrationId: `mig_intent_archived_${index}`, characterRef: characters[index % characters.length].migrationId,
+      content: `archived intent ${index}`, timePrecision: "vague", sourceMemoryRef: `mig_memory_archived_${index}`,
+      source: source("memoryNodes", `archived-${index}`),
+    })),
+  ];
+  const legacyCharacterMemories = Array.from({ length: 11 }, (_, index) => ({
+    characterSourceId: `char-${index % characters.length}`,
+    memory: { id: `legacy-${index}`, date: "2026-08-01", summary: `legacy summary ${index}` },
+  }));
+  const fixturePayload = {
+    identities: [{ migrationId: "mig_identity_user", kind: "user", displayName: "Fixture User", source: source("metadata.userProfile", "user") }],
+    characters, relationships: [], conversations, messages,
+    moments: [], diaries, worlds, worldbooks, stories, games: [{ migrationId: "mig_game_0", title: "game", source: source("games", "game-0") }],
+    schedules, eventBoxes: Array.from({ length: 56 }, (_, index) => ({ migrationId: `mig_event_box_${index}`, source: source("eventBoxes", String(index)) })),
+    memories, futureIntents, memoryLinks: Array.from({ length: 32667 }, (_, index) => ({
+      migrationId: `mig_memory_link_${index}`, fromMemoryRef: memories[index % memories.length].migrationId,
+      toMemoryRef: memories[(index + 1) % memories.length].migrationId, type: "temporal",
+      source: source("memoryLinks", String(index)),
+    })),
+    extended: { legacyCharacterMemories },
+    compat: Array.from({ length: 7 }, (_, index) => ({ store: `compat-${index}`, records: [] })),
+    provenance: {
+      idMap: {
+        characters: Object.fromEntries(characters.map((entry, index) => [`char-${index}`, entry.migrationId])),
+        conversations: Object.fromEntries(conversations.map((entry, index) => [`char-${index}`, entry.migrationId])),
+      },
+      normalizationReport: { redactions: { count: 0, paths: [] }, stores: {} },
+      sourceManifest: {}, metadataRedactions: [], excludedSensitiveStores: {}, excludedRuntimeStores: {},
+    },
+  };
+  const manifest = {
+    format: "float_migration", formatVersion: 1, packageId: "pkg-offline-story-fixture",
+    source: { platform: "sully", format: "sully_v3", formatVersion: 3, backupFingerprint: fingerprint },
+    createdAt: "2026-09-01T00:00:00.000Z",
+    counts: {
+      identities: 1, characters: 4, relationships: 0, conversations: 4, messages: 5153, moments: 0, diaries: 1,
+      worlds: 1, worldbooks: 14, stories: 193, games: 1, schedules: 11, eventBoxes: 56, memories: 397,
+      futureIntents: 9, memoryLinks: 32667, compatStores: 7,
+    },
+    assets: { count: 79, totalBytes: 237 }, skippedByPolicy: {}, warnings: [],
+  };
+  const fixtureBytes = await writeFloatMigrationPackage({
+    manifest,
+    payload: fixturePayload,
+    binaryAssets: assets.map((ref) => ({ ref, bytes: new Uint8Array([1, 2, 3]) })),
+  });
+  const realMode = process.argv[2] === "--real";
+  const requestedPackagePath = process.env.SULLY_FINAL_PACKAGE_PATH ?? (realMode ? process.argv[3] : undefined);
+  if (realMode && !requestedPackagePath) {
+    throw new Error("--real requires a package path argument or SULLY_FINAL_PACKAGE_PATH");
+  }
+  const inputBytes = requestedPackagePath ? await readFile(requestedPackagePath) : fixtureBytes;
+
+  const read = await readFloatMigrationPackage(inputBytes);
   assert.equal(read.ok, true, read.ok ? "" : read.errors.join("\n"));
   const payload = read.payload;
   const emptySnapshot = {
@@ -22,7 +159,7 @@ try {
     async readSnapshot() { return emptySnapshot; },
   };
 
-  const prepared = await dryRunFloatMigrationPackage(await readFile(packagePath), { storage });
+  const prepared = await dryRunFloatMigrationPackage(inputBytes, { storage });
   assert.equal(prepared.ok, true, prepared.ok ? "" : prepared.errors.join("\n"));
   const { plan, summary } = prepared.dryRun;
   const offline = payload.messages.filter((message) => message.sourceMetadata?.source === "date");
@@ -126,7 +263,7 @@ try {
         created.archive = ["archive"];
       }
       if (reconciliation.idMap === "create") {
-        this.snapshot.idMap = structuredClone(nativePlan.idMap);
+        this.snapshot.idMap = structuredClone(reconciliation.idMapValues);
         created.idMap = ["idmap"];
       }
       return { created, warnings: [], failures: [] };
@@ -162,7 +299,7 @@ try {
   }
 
   const storageAfterApply = new MemoryStorage();
-  const first = await dryRunFloatMigrationPackage(await readFile(packagePath), { storage: storageAfterApply });
+  const first = await dryRunFloatMigrationPackage(inputBytes, { storage: storageAfterApply });
   assert.equal(first.ok, true, first.ok ? "" : first.errors.join("\n"));
   assert.equal(first.dryRun.reconciliation.messages.create.length, 4708);
   assert.equal(first.dryRun.reconciliation.storySessions.create.length, 1);
@@ -170,8 +307,7 @@ try {
   assert.equal(first.dryRun.reconciliation.storySessions.reuse.length, 0);
   assert.equal(first.dryRun.reconciliation.storyMessages.conflicts.length, 0);
 
-  const applied = await (await import("node:fs/promises")).readFile(packagePath).then((bytes) =>
-    runtime.requireModule("native/importer.js").applyFloatMigrationPackage(bytes, { storage: storageAfterApply }));
+  const applied = await applyFloatMigrationPackage(inputBytes, { storage: storageAfterApply });
   assert.equal(applied.ok, true, JSON.stringify(applied.expectedVsActual));
   assert.equal(applied.expectedVsActual.remainingCreatesAfterApply, 0);
   assert.equal(storageAfterApply.snapshot.messages.length, 4708);
@@ -180,14 +316,14 @@ try {
   assert.equal(applied.journal.created.storySessions.length, 1);
   assert.equal(applied.journal.created.storyMessages.length, 445);
 
-  const second = await runtime.requireModule("native/importer.js").applyFloatMigrationPackage(await readFile(packagePath), { storage: storageAfterApply });
+  const second = await applyFloatMigrationPackage(inputBytes, { storage: storageAfterApply });
   assert.equal(second.ok, true, JSON.stringify(second.expectedVsActual));
   assert.equal(second.expectedVsActual.actualCreates, 0);
   assert.equal(second.dryRun.reconciliation.totals.create, 0);
   assert.equal(storageAfterApply.snapshot.storySessions.length, 1);
   assert.equal(storageAfterApply.snapshot.storyMessages.length, 445);
 
-  const rollback = await runtime.requireModule("native/importer.js").rollbackFloatMigrationRun(applied.journal.runId, storageAfterApply);
+  const rollback = await rollbackFloatMigrationRun(applied.journal.runId, storageAfterApply);
   assert.equal(rollback.ok, true);
   assert.equal(storageAfterApply.snapshot.storySessions.length, 0);
   assert.equal(storageAfterApply.snapshot.storyMessages.length, 0);
@@ -199,21 +335,61 @@ try {
   const existingMessage = { ...existingPlan.storyMessages[0], sessionId: existingSession.id, rawContent: "Keep this existing StoryMessage" };
   existingStorage.snapshot.storySessions = [existingSession];
   existingStorage.snapshot.storyMessages = [existingMessage];
-  const existingDryRun = await dryRunFloatMigrationPackage(await readFile(packagePath), { storage: existingStorage });
+  const existingDryRun = await dryRunFloatMigrationPackage(inputBytes, { storage: existingStorage });
   assert.equal(existingDryRun.ok, true, existingDryRun.ok ? "" : existingDryRun.errors.join("\n"));
   assert.equal(existingDryRun.dryRun.reconciliation.storySessions.create.length, 0);
   assert.equal(existingDryRun.dryRun.reconciliation.storySessions.reuse.length, 1);
   assert.equal(existingDryRun.dryRun.reconciliation.storyMessages.conflicts.length, 1);
   assert.equal(existingDryRun.dryRun.reconciliation.storyMessages.create.length, 444);
-  const existingApplied = await runtime.requireModule("native/importer.js").applyFloatMigrationPackage(await readFile(packagePath), { storage: existingStorage });
+  const existingApplied = await applyFloatMigrationPackage(inputBytes, { storage: existingStorage });
   assert.equal(existingApplied.ok, true, JSON.stringify(existingApplied.expectedVsActual));
   assert.deepEqual(existingStorage.snapshot.storySessions[0], existingSession);
   assert.equal(existingStorage.snapshot.storyMessages.find((message) => message.id === existingMessage.id).rawContent, existingMessage.rawContent);
   assert.equal(existingStorage.snapshot.storyMessages.length, 445);
-  const existingRollback = await runtime.requireModule("native/importer.js").rollbackFloatMigrationRun(existingApplied.journal.runId, existingStorage);
+  const existingSecond = await applyFloatMigrationPackage(inputBytes, { storage: existingStorage });
+  assert.equal(existingSecond.expectedVsActual.actualCreates, 0);
+  assert.equal(existingSecond.dryRun.reconciliation.totals.create, 0);
+  assert.equal(existingStorage.snapshot.storyMessages.every((message) => message.sessionId === existingSession.id), true);
+  assert.equal(existingStorage.snapshot.idMap.storySessions[[...counts.keys()][0]], existingSession.id);
+  const existingRollback = await rollbackFloatMigrationRun(existingApplied.journal.runId, existingStorage);
   assert.equal(existingRollback.ok, true);
   assert.deepEqual(existingStorage.snapshot.storySessions, [existingSession]);
   assert.deepEqual(existingStorage.snapshot.storyMessages, [existingMessage]);
+
+  const conflictStorage = new MemoryStorage();
+  const conflictingLatest = {
+    ...plan.storyMessages.at(-1),
+    sessionId: "unrelated-existing-session",
+    rawContent: "Existing conflicting latest StoryMessage",
+  };
+  conflictStorage.snapshot.storyMessages = [conflictingLatest];
+  const conflictDryRun = await dryRunFloatMigrationPackage(inputBytes, { storage: conflictStorage });
+  assert.equal(conflictDryRun.ok, true, conflictDryRun.ok ? "" : conflictDryRun.errors.join("\n"));
+  assert.equal(conflictDryRun.dryRun.reconciliation.storySessions.create.length, 1);
+  assert.equal(conflictDryRun.dryRun.reconciliation.storyMessages.conflicts.length, 1);
+  const safeSession = conflictDryRun.dryRun.reconciliation.storySessions.create[0];
+  assert.notEqual(safeSession.lastMessageId, conflictingLatest.id);
+  if (safeSession.lastMessageId) {
+    const safeMessage = conflictDryRun.dryRun.reconciliation.storyMessages.create.find((message) => message.id === safeSession.lastMessageId);
+    assert.ok(safeMessage);
+    assert.equal(safeMessage.sessionId, safeSession.id);
+    assert.equal(safeSession.lastMessagePreview, safeMessage.rawContent.slice(0, 120));
+  }
+  const conflictApplied = await applyFloatMigrationPackage(inputBytes, { storage: conflictStorage });
+  assert.equal(conflictApplied.ok, true, JSON.stringify(conflictApplied.expectedVsActual));
+  const persistedSafeSession = conflictStorage.snapshot.storySessions[0];
+  assert.notEqual(persistedSafeSession.lastMessageId, conflictingLatest.id);
+  if (persistedSafeSession.lastMessageId) {
+    const persistedSafeMessage = conflictStorage.snapshot.storyMessages.find((message) => message.id === persistedSafeSession.lastMessageId);
+    assert.ok(persistedSafeMessage);
+    assert.equal(persistedSafeMessage.sessionId, persistedSafeSession.id);
+    assert.equal(persistedSafeSession.lastMessagePreview, persistedSafeMessage.rawContent.slice(0, 120));
+  }
+  assert.equal(conflictStorage.snapshot.storyMessages.find((message) => message.id === conflictingLatest.id).rawContent, conflictingLatest.rawContent);
+  const conflictRollback = await rollbackFloatMigrationRun(conflictApplied.journal.runId, conflictStorage);
+  assert.equal(conflictRollback.ok, true);
+  assert.deepEqual(conflictStorage.snapshot.storySessions, []);
+  assert.deepEqual(conflictStorage.snapshot.storyMessages, [conflictingLatest]);
 
   console.log("Offline Sully RP Story routing GREEN tests passed");
 } finally {

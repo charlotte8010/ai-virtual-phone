@@ -22,6 +22,7 @@
     "test:migration-foundation": "node scripts/test-migration-foundation.mjs",
     "test:sully-migration-package": "node scripts/test-sully-migration-package.mjs",
     "test:migration-offline-story": "node scripts/test-migration-offline-story.mjs",
+    "test:migration-offline-story:real": "node scripts/test-migration-offline-story.mjs --real",
     "test:migration-completion": "node scripts/test-migration-completion.mjs && node scripts/test-migration-package-reader-negative.mjs",
     "migration:sully:convert": "node scripts/convert-sully-backup.mjs",
     "check:sdk": "node scripts/check-custom-app-sdk-consistency.mjs",
