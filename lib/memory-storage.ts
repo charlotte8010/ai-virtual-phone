@@ -35,6 +35,14 @@ function hasBrowserApi(): boolean {
     return typeof window !== "undefined" && typeof indexedDB !== "undefined";
 }
 
+function hasObjectStore(db: IDBDatabase, name: string): boolean {
+    // The fallback also keeps lightweight non-browser test doubles compatible;
+    // real IndexedDB connections always expose objectStoreNames.contains().
+    return typeof db.objectStoreNames?.contains === "function"
+        ? db.objectStoreNames.contains(name)
+        : true;
+}
+
 function ensureMemoryIndexes(store: IDBObjectStore): void {
     if (!store.indexNames.contains("by_character")) {
         store.createIndex("by_character", "characterId", { unique: false });
@@ -71,7 +79,7 @@ function ensureCoreCompactionSnapshotIndexes(store: IDBObjectStore): void {
     }
 }
 
-function upgradeMemorySchema(db: IDBDatabase, tx: IDBTransaction | null): void {
+function upgradeMemorySchema(db: IDBDatabase, _oldVersion: number, tx: IDBTransaction | null): void {
     let store: IDBObjectStore;
     if (!db.objectStoreNames.contains(STORE_NAME)) {
         store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
@@ -105,7 +113,7 @@ async function openDb(): Promise<IDBDatabase | null> {
     // Data restore can leave the database at a version above this module's
     // constant. If that restored schema predates the snapshot store, perform
     // one additional upgrade so Apply/Restore can remain one transaction.
-    if (db && !db.objectStoreNames.contains(CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
+    if (db && !hasObjectStore(db, CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
         const nextVersion = db.version + 1;
         db.close();
         db = await openIndexedDbAtLeast(DB_NAME, nextVersion, upgradeMemorySchema).catch(() => null);
@@ -210,12 +218,9 @@ export async function replaceCoreMemoriesWithSnapshot(
         throw new Error("核心记忆整理需要同时存在原始记录和候选记录");
     }
     const db = await openDb();
-    if (!db) {
-        if (hasBrowserApi()) throw new Error("记忆数据库不可用");
-        return;
-    }
+    if (!db) throw new Error("记忆数据库不可用");
     try {
-        if (!db.objectStoreNames.contains(CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
+        if (!hasObjectStore(db, CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
             throw new Error("核心记忆整理快照仓库不可用");
         }
         const tx = db.transaction([STORE_NAME, CORE_COMPACTION_SNAPSHOT_STORE_NAME], "readwrite");
@@ -234,7 +239,7 @@ export async function replaceCoreMemoriesWithSnapshot(
 
 async function loadCoreCompactionSnapshotByRunId(runId: string): Promise<CoreCompactionSnapshot | null> {
     const db = await openDb();
-    if (!db || !db.objectStoreNames.contains(CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
+    if (!db || !hasObjectStore(db, CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
         db?.close();
         return null;
     }
@@ -250,7 +255,7 @@ export async function loadLatestCoreCompactionSnapshot(
     characterId: string,
 ): Promise<CoreCompactionSnapshot | null> {
     const db = await openDb();
-    if (!db || !db.objectStoreNames.contains(CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
+    if (!db || !hasObjectStore(db, CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
         db?.close();
         return null;
     }
