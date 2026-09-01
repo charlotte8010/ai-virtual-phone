@@ -14,6 +14,7 @@ export const CORE_COMPACTION_MAINTENANCE_PROMPT = "你是核心记忆维护助�
     + "当前核心记忆（唯一事实来源）：\n{{cores}}\n\n"
     + "要求：\n"
     + "- 每条只表达一个主要稳定事实\n"
+    + "- 每条必须列出支撑该事实的 sourceCoreIds，只能使用输入中的 core_id；合并事实时列出全部来源\n"
     + "- 使用第三人称、事实性、简洁自然的中文\n"
     + "- 高度重复内容合并；一个长记忆中的多个独立事实可以拆分\n"
     + "- 普通日常细节、临时情绪和不确定内容删除\n"
@@ -22,7 +23,7 @@ export const CORE_COMPACTION_MAINTENANCE_PROMPT = "你是核心记忆维护助�
     + "- 不需要为了凑数量增加内容\n"
     + "- 不要在正文中机械添加日期；记忆创建时间与事实发生时间不同\n"
     + "- 严格只输出 JSON，不要 Markdown、标题或解释文字\n\n"
-    + "输出格式：\n{\"memories\":[{\"content\":\"稳定事实\",\"tags\":[\"关系\"],\"kind\":\"relationship\"}]}";
+    + "输出格式：\n{\"memories\":[{\"content\":\"稳定事实\",\"tags\":[\"关系\"],\"kind\":\"relationship\",\"sourceCoreIds\":[\"输入中的 core_id\"]}]}";
 
 const MAX_CONTENT_LENGTH = 2000;
 const MAX_TAGS = 6;
@@ -39,6 +40,7 @@ export type CoreCompactionCandidate = {
     content: string;
     tags: string[];
     kind: Exclude<MemoryKind, "future_intent">;
+    sourceCoreIds: string[];
     mood?: MemoryMood;
 };
 
@@ -129,7 +131,7 @@ function parseJson(text: string): unknown | undefined {
     return undefined;
 }
 
-function sanitizeCandidate(raw: unknown): CoreCompactionCandidate | null {
+function sanitizeCandidate(raw: unknown, allowedSourceIds: ReadonlySet<string>): CoreCompactionCandidate | null {
     if (!isRecord(raw) || typeof raw.content !== "string") return null;
     const content = canonicalContent(raw.content);
     if (!content || content.length > MAX_CONTENT_LENGTH) return null;
@@ -146,15 +148,24 @@ function sanitizeCandidate(raw: unknown): CoreCompactionCandidate | null {
             .filter(Boolean))).slice(0, MAX_TAGS)
         : [];
     const mood = MEMORY_MOODS.includes(raw.mood as MemoryMood) ? raw.mood as MemoryMood : undefined;
+    if (!Array.isArray(raw.sourceCoreIds) || raw.sourceCoreIds.length === 0) return null;
+    const sourceCoreIds = Array.from(new Set(raw.sourceCoreIds));
+    if (sourceCoreIds.some(sourceId => typeof sourceId !== "string" || !allowedSourceIds.has(sourceId))) {
+        return null;
+    }
     return {
         content,
         tags,
         kind,
+        sourceCoreIds: sourceCoreIds as string[],
         ...(mood ? { mood } : {}),
     };
 }
 
-function parseCandidates(text: string): { candidates: CoreCompactionCandidate[]; error?: string } {
+function parseCandidates(
+    text: string,
+    allowedSourceIds: ReadonlySet<string>,
+): { candidates: CoreCompactionCandidate[]; error?: string } {
     const payload = parseJson(text);
     const rawCandidates = Array.isArray(payload)
         ? payload
@@ -166,15 +177,23 @@ function parseCandidates(text: string): { candidates: CoreCompactionCandidate[];
     }
 
     const candidates: CoreCompactionCandidate[] = [];
-    const seen = new Set<string>();
+    const candidateIndexByContent = new Map<string, number>();
     for (const raw of rawCandidates) {
-        const candidate = sanitizeCandidate(raw);
+        const candidate = sanitizeCandidate(raw, allowedSourceIds);
         if (!candidate) {
-            return { candidates: [], error: "核心记忆整理结果包含无效或未来事项，已取消应用" };
+            return { candidates: [], error: "核心记忆整理结果包含无效来源或未来事项，已取消应用" };
         }
         const key = canonicalContent(candidate.content);
-        if (seen.has(key)) continue;
-        seen.add(key);
+        const existingIndex = candidateIndexByContent.get(key);
+        if (existingIndex !== undefined) {
+            const existing = candidates[existingIndex];
+            existing.sourceCoreIds = Array.from(new Set([
+                ...existing.sourceCoreIds,
+                ...candidate.sourceCoreIds,
+            ]));
+            continue;
+        }
+        candidateIndexByContent.set(key, candidates.length);
         candidates.push(candidate);
     }
     return candidates.length > 0
@@ -218,25 +237,35 @@ export function buildCompactedCoreEntries(
     createMemoryId: (runId: string, index: number) => string,
 ): MemoryEntry[] {
     const sourceApp = sourceAppForEntries(originalEntries);
-    const compactedFromCoreIds = originalEntries.map(entry => entry.id);
-    return candidates.map((candidate, index) => ({
-        id: createMemoryId(runId, index),
-        characterId,
-        sourceApp,
-        type: "core",
-        content: candidate.content,
-        importance: 0.95,
-        createdAt: compactedAt,
-        updatedAt: compactedAt,
-        tags: [...candidate.tags],
-        kind: candidate.kind,
-        ...(candidate.mood ? { mood: candidate.mood } : {}),
-        metadata: {
-            compactionRunId: runId,
-            compactedAt,
-            compactedFromCoreIds: [...compactedFromCoreIds],
-        },
-    }));
+    const originalsById = new Map(originalEntries.map(entry => [entry.id, entry]));
+    return candidates.map((candidate, index) => {
+        const sourceEntries = candidate.sourceCoreIds.map(sourceId => originalsById.get(sourceId));
+        if (sourceEntries.some((entry): entry is undefined => !entry)) {
+            throw new Error("核心记忆整理结果引用了未知来源");
+        }
+        const inheritedCreatedAt = (sourceEntries as MemoryEntry[])
+            .map(entry => entry.createdAt)
+            .sort((left, right) => left.localeCompare(right))[0];
+        if (!inheritedCreatedAt) throw new Error("核心记忆整理结果缺少有效来源时间");
+        return {
+            id: createMemoryId(runId, index),
+            characterId,
+            sourceApp,
+            type: "core",
+            content: candidate.content,
+            importance: 0.95,
+            createdAt: inheritedCreatedAt,
+            updatedAt: compactedAt,
+            tags: [...candidate.tags],
+            kind: candidate.kind,
+            ...(candidate.mood ? { mood: candidate.mood } : {}),
+            metadata: {
+                compactionRunId: runId,
+                compactedAt,
+                compactedFromCoreIds: [...candidate.sourceCoreIds],
+            },
+        };
+    });
 }
 
 export async function previewCoreMemoryCompaction(
@@ -264,7 +293,7 @@ export async function previewCoreMemoryCompaction(
         };
     }
 
-    const parsed = parseCandidates(result.content);
+    const parsed = parseCandidates(result.content, new Set(originalEntries.map(entry => entry.id)));
     if (parsed.error) return { success: false, error: parsed.error };
     const preview: CoreCompactionPreview = {
         characterId,

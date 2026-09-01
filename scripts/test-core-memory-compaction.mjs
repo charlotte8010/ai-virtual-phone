@@ -150,10 +150,10 @@ context.__sideEffects = { embeddings: 0, links: 0, recallStats: 0, longTermWrite
 context.__llmResponses = [{
     content: JSON.stringify({
         memories: [
-            { content: "用户与角色已经确认恋爱关系。", tags: ["关系"], kind: "relationship" },
-            { content: "用户与角色已经确认恋爱关系。", tags: ["重复"], kind: "relationship" },
-            { content: "双方保持稳定的长期亲密关系。", tags: ["关系"], kind: "relationship" },
-            { content: "角色计划下个月与用户旅行。", tags: ["未来"], kind: "future_intent" },
+            { content: "用户与角色已经确认恋爱关系。", tags: ["关系"], kind: "relationship", sourceCoreIds: ["c1-b"] },
+            { content: "用户与角色已经确认恋爱关系。", tags: ["重复"], kind: "relationship", sourceCoreIds: ["c1-a"] },
+            { content: "双方保持稳定的长期亲密关系。", tags: ["关系"], kind: "relationship", sourceCoreIds: ["c1-b"] },
+            { content: "角色计划下个月与用户旅行。", tags: ["未来"], kind: "future_intent", sourceCoreIds: ["c1-a"] },
         ],
     }),
 }];
@@ -171,9 +171,9 @@ assert.match(context.__llmCalls[0], /created_at=2026-08-01T12:00:00.000Z/);
 context.__llmResponses = [{
     content: JSON.stringify({
         memories: [
-            { content: "用户与角色已经确认恋爱关系。", tags: ["关系"], kind: "relationship" },
-            { content: "用户与角色已经确认恋爱关系。", tags: ["重复"], kind: "relationship" },
-            { content: "双方保持稳定的长期亲密关系。", tags: ["关系"], kind: "relationship" },
+            { content: "用户与角色已经确认恋爱关系。", tags: ["关系"], kind: "relationship", sourceCoreIds: ["c1-b"] },
+            { content: "用户与角色已经确认恋爱关系。", tags: ["重复"], kind: "relationship", sourceCoreIds: ["c1-a"] },
+            { content: "双方保持稳定的长期亲密关系。", tags: ["关系"], kind: "relationship", sourceCoreIds: ["c1-b"] },
         ],
     }),
 }];
@@ -205,9 +205,22 @@ for (const entry of context.__cores.filter(item => item.characterId === "char-1"
     assert.equal(entry.sourceMessageIds, undefined);
     assert.equal(entry.metadata.compactionRunId, "run-char-1");
     assert.equal(entry.metadata.compactedAt, "2026-09-02T12:00:00.000Z");
-    assert.deepEqual(entry.metadata.compactedFromCoreIds, ["c1-a", "c1-b"]);
     assert.equal(entry.metadata.eventDate, undefined);
 }
+const compactedEntries = context.__cores.filter(item => item.characterId === "char-1");
+assert.deepEqual(
+    compactedEntries.map(entry => entry.createdAt),
+    ["2026-08-01T12:00:00.000Z", "2026-08-02T12:00:00.000Z"],
+    "new Core records inherit source history instead of looking newly created",
+);
+assert.deepEqual(compactedEntries.map(entry => entry.updatedAt), [
+    "2026-09-02T12:00:00.000Z",
+    "2026-09-02T12:00:00.000Z",
+]);
+assert.deepEqual(compactedEntries.map(entry => entry.metadata.compactedFromCoreIds), [
+    ["c1-b", "c1-a"],
+    ["c1-b"],
+]);
 assert.deepEqual(context.__replaceCalls[0].snapshot.originalEntries, originalC1, "snapshot preserves every original field");
 assert.deepEqual(context.__replaceCalls[0].snapshot.originalEntries.map(entry => entry.createdAt), originalC1.map(entry => entry.createdAt));
 assert.equal(context.__replaceCalls[0].snapshot.characterId, "char-1");
@@ -225,7 +238,7 @@ assert.equal(context.__replaceCalls.length, 1);
 
 context.__failReplacement = true;
 context.__llmResponses = [{
-    content: JSON.stringify({ memories: [{ content: "一次独立事实。", kind: "event" }] }),
+    content: JSON.stringify({ memories: [{ content: "一次独立事实。", kind: "event", sourceCoreIds: ["c2-a"] }] }),
 }];
 const failurePreviewResult = await compaction.namespace.previewCoreMemoryCompaction("char-2", "角色二", {
     now: () => "2026-09-02T12:10:00.000Z",
