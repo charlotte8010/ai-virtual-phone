@@ -13,6 +13,14 @@ import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { simpleLLMCall } from "./api-helpers";
 
 const coreBuildingSet = new Set<string>();
+const CORE_MEMORY_SAFETY_SUFFIX = [
+    "【Core Memory 内置安全约束】",
+    "尚未实际发生的计划、承诺、目标、愿望、预期不得进入 Core。",
+    "不得把“曾经计划/期待”误写为“已经发生”。",
+    "cancelled / waiting / unfulfilled / merely discussed future matters 不得成为稳定 Core。",
+    "只有输入文本本身明确描述已经实际发生的经历、已成立关系或稳定事实时才可进入 Core。",
+    "无法确认是否实际发生时，宁可忽略，不要推测。",
+].join("\n");
 
 type CoreTimelineItem = {
     id: string;
@@ -81,12 +89,13 @@ export async function runCoreMemoryPipeline(
 
     const { eventsText, earliest, latest } = formatted;
     const promptTemplate = config.coreMemoryPrompt?.trim() || DEFAULT_CORE_MEMORY_PROMPT;
-    const prompt = promptTemplate
+    const substitutedPrompt = promptTemplate
         .replace(/\{\{char\}\}/gi, characterName)
         .replace(/\{\{earliest\}\}/gi, earliest)
         .replace(/\{\{latest\}\}/gi, latest)
         .replace(/\{\{events\}\}/gi, eventsText)
         .replace(/\{\{longTermMemories\}\}/gi, eventsText);
+    const prompt = [substitutedPrompt, CORE_MEMORY_SAFETY_SUFFIX].join("\n\n");
 
     const result = await simpleLLMCall(
         apiConfig,
