@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatMessageRole } from "../../chat-storage";
+import type { StoryMessage, StoryMessageRole, StorySession } from "../../story-storage";
 import type { CalendarColorKey, CalendarScheduleItem, CalendarWeekPlan } from "../../calendar-types";
 import type { MemoryEntry, MemoryKind, MemoryMood, CognitiveRoom, FutureIntentMeta } from "../../memory-types";
 import type { MigrationAssetRef, MigrationFutureIntent, MigrationMoment, MigrationWorldbook } from "../format/types";
@@ -36,6 +37,13 @@ function plainText(value: unknown): string {
 }
 function mapRole(role: string): ChatMessageRole {
   return role === "user" || role === "assistant" || role === "system" ? role : "system";
+}
+function isOfflineStoryMessage(message: { sourceMetadata?: Record<string, unknown> }): boolean {
+  return message.sourceMetadata?.source === "date";
+}
+function mapStoryRole(role: string, migrationId: string): StoryMessageRole {
+  if (role === "user" || role === "assistant") return role;
+  throw new Error(`Sully offline RP mapping stopped: ${migrationId} has unsupported role ${role}`);
 }
 function safeImportance(value: unknown): number {
   const number = asNumber(value);
@@ -270,8 +278,33 @@ export function buildNativeMigrationPlan(
   const characterTargets = new Map(characters.map((entry) => [entry.sourceMigrationId, entry.value.id]));
   const characterNames = new Map(characters.map((entry) => [entry.value.id, entry.value.name]));
 
+  const conversationById = new Map(payload.conversations.map((conversation) => [conversation.migrationId, conversation]));
+  const sourceCharacterRef = (message: typeof payload.messages[number]): string | undefined =>
+    message.characterRef ?? (message.conversationRef ? conversationById.get(message.conversationRef)?.characterRef : undefined);
+  const storySourceMessages = payload.messages.filter(isOfflineStoryMessage);
+  const unresolvedStoryMessages = storySourceMessages.filter((message) => {
+    const sourceRef = sourceCharacterRef(message);
+    return !sourceRef || !characterTargets.has(sourceRef);
+  });
+  if (unresolvedStoryMessages.length) {
+    const details = unresolvedStoryMessages.slice(0, 10).map((message) => message.migrationId).join(", ");
+    throw new Error(`Sully offline RP mapping stopped: ${unresolvedStoryMessages.length} messages have no resolvable character (${details})`);
+  }
+
+  const storyMessagesByCharacter = new Map<string, typeof payload.messages>();
+  for (const message of storySourceMessages) {
+    const sourceRef = sourceCharacterRef(message)!;
+    const list = storyMessagesByCharacter.get(sourceRef) ?? [];
+    list.push(message);
+    storyMessagesByCharacter.set(sourceRef, list);
+  }
+  for (const list of storyMessagesByCharacter.values()) {
+    list.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.migrationId.localeCompare(b.migrationId));
+  }
+
   const sourceMessagesByConversation = new Map<string, typeof payload.messages>();
-  for (const message of payload.messages) {
+  const chatSourceMessages = payload.messages.filter((message) => !isOfflineStoryMessage(message));
+  for (const message of chatSourceMessages) {
     if (!message.conversationRef) continue;
     const list = sourceMessagesByConversation.get(message.conversationRef) ?? [];
     list.push(message);
@@ -283,15 +316,18 @@ export function buildNativeMigrationPlan(
   const sessions = [] as NativeMigrationPlan["sessions"];
   const sessionByConversation = new Map<string, string>();
   for (const conversation of payload.conversations) {
-    const characterId = conversation.characterRef ? characterTargets.get(conversation.characterRef) : undefined;
+    const list = sourceMessagesByConversation.get(conversation.migrationId) ?? [];
+    if (!list.length) continue;
+    const sourceCharacter = conversation.characterRef ?? list[0]?.characterRef;
+    const characterId = sourceCharacter ? characterTargets.get(sourceCharacter) : undefined;
     if (!characterId) {
-      warnings.push(`conversation ${conversation.migrationId} has no resolvable character; its messages will be skipped`);
+      warnings.push(`conversation ${conversation.migrationId} has no resolvable character; its Chat messages will be skipped`);
       continue;
     }
-    const contactId = setMap("contacts", conversation.characterRef!, deterministicNativeId("contact", sourceFingerprint, conversation.characterRef!));
+    const resolvedSourceCharacter = sourceCharacter!;
+    const contactId = setMap("contacts", resolvedSourceCharacter, deterministicNativeId("contact", sourceFingerprint, resolvedSourceCharacter));
     const sessionId = setMap("sessions", conversation.migrationId, deterministicNativeId("session", sourceFingerprint, conversation.migrationId));
     sessionByConversation.set(conversation.migrationId, sessionId);
-    const list = sourceMessagesByConversation.get(conversation.migrationId) ?? [];
     const earliest = list[0]?.createdAt ?? conversation.startedAt ?? fallbackTime;
     const latest = list[list.length - 1]?.createdAt ?? conversation.endedAt ?? earliest;
     contacts.push({ id: contactId, characterId, addedAt: iso(earliest, fallbackTime) });
@@ -306,10 +342,30 @@ export function buildNativeMigrationPlan(
     });
   }
 
+  const storySessions: StorySession[] = [];
+  const storySessionByCharacter = new Map<string, string>();
+  for (const sourceCharacter of [...storyMessagesByCharacter.keys()].sort()) {
+    const characterId = characterTargets.get(sourceCharacter);
+    if (!characterId) continue;
+    const sourceMessages = storyMessagesByCharacter.get(sourceCharacter)!;
+    const sessionId = setMap("storySessions", sourceCharacter, deterministicNativeId("story_session", sourceFingerprint, sourceCharacter));
+    storySessionByCharacter.set(sourceCharacter, sessionId);
+    const latest = sourceMessages[sourceMessages.length - 1];
+    const latestCreatedAt = iso(latest?.createdAt, fallbackTime);
+    storySessions.push({
+      id: sessionId,
+      characterId,
+      title: "Sully 线下剧情",
+      updatedAt: latestCreatedAt,
+      lastMessageId: setMap("storyMessages", latest.migrationId, deterministicNativeId("story_message", sourceFingerprint, latest.migrationId)),
+      lastMessagePreview: (latest.content ?? "").slice(0, 120),
+    });
+  }
+
   const orderBySession = new Map<string, number>();
   const messages: ChatMessage[] = [];
   const sourceMessageType = new Map<string, string | undefined>();
-  for (const source of payload.messages) {
+  for (const source of chatSourceMessages) {
     const sessionId = source.conversationRef ? sessionByConversation.get(source.conversationRef) : undefined;
     if (!sessionId) continue;
     const id = setMap("messages", source.migrationId, deterministicNativeId("message", sourceFingerprint, source.migrationId));
@@ -329,6 +385,20 @@ export function buildNativeMigrationPlan(
     };
     messages.push(message);
     sourceMessageType.set(id, source.messageType);
+  }
+  const storyMessages: StoryMessage[] = [];
+  for (const source of storySourceMessages) {
+    const sourceCharacter = sourceCharacterRef(source)!;
+    const sessionId = storySessionByCharacter.get(sourceCharacter);
+    if (!sessionId) continue;
+    const id = setMap("storyMessages", source.migrationId, deterministicNativeId("story_message", sourceFingerprint, source.migrationId));
+    storyMessages.push({
+      id,
+      sessionId,
+      role: mapStoryRole(source.role, source.migrationId),
+      rawContent: source.content ?? "",
+      createdAt: iso(source.createdAt, fallbackTime),
+    });
   }
   const messagesBySession = new Map<string, ChatMessage[]>();
   for (const message of messages) {
@@ -642,6 +712,8 @@ export function buildNativeMigrationPlan(
     contacts,
     sessions,
     messages,
+    storySessions,
+    storyMessages,
     media,
     moments,
     momentComments,

@@ -68,6 +68,10 @@ async function materializeInlineAssets(plan: NativeMigrationPlan, pkg: ReadFloat
 function dryRunSummary(plan: NativeMigrationPlan): NativeMigrationDryRun["summary"] {
   return {
     characters: plan.characters.length,
+    sourceMessages: plan.messages.length + plan.storyMessages.length,
+    chatMessages: plan.messages.length,
+    storyMessages: plan.storyMessages.length,
+    storySessions: plan.storySessions.length,
     messages: plan.messages.length,
     assets: plan.media.length,
     moments: plan.moments.length,
@@ -138,6 +142,8 @@ function copyReconciliationToJournal(journal: MigrationRunJournal, r: NativeMigr
   set("worldbooks", r.worldbooks, id);
   set("calendar", r.calendar, id);
   set("memories", r.memories, id);
+  set("storySessions", r.storySessions, id);
+  set("storyMessages", r.storyMessages, id);
   const archiveKey = `archive:${journal.sourceFingerprint}`;
   const idMapKey = `idmap:${journal.sourceFingerprint}`;
   if (r.archive === "reuse") journal.reused.archive = [archiveKey];

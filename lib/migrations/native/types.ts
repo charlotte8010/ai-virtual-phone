@@ -1,5 +1,6 @@
 import type { Character } from "../../character-types";
 import type { ChatContact, ChatMessage, ChatSession } from "../../chat-storage";
+import type { StoryMessage, StorySession } from "../../story-storage";
 import type { CharacterWorldGroup } from "../../character-world-storage";
 import type { MomentComment, MomentPost } from "../../moments-types";
 import type { DiaryEntry } from "../../diary-entry-types";
@@ -20,7 +21,7 @@ import type {
 export type NativeMigrationDomain =
   | "identities" | "characters" | "contacts" | "sessions" | "messages" | "media"
   | "moments" | "momentComments" | "diaries" | "worlds" | "worldbooks" | "calendar"
-  | "memories" | "archive" | "idMap";
+  | "memories" | "storySessions" | "storyMessages" | "archive" | "idMap";
 
 export type MigrationDecision = "create" | "reuse" | "skip" | "conflict" | "failed";
 
@@ -83,6 +84,8 @@ export interface NativeMigrationPlan {
   contacts: ChatContact[];
   sessions: ChatSession[];
   messages: ChatMessage[];
+  storySessions: StorySession[];
+  storyMessages: StoryMessage[];
   media: NativeMediaImport[];
   moments: MomentPost[];
   momentComments: MomentComment[];
@@ -107,6 +110,8 @@ export interface NativeMigrationSnapshot {
   contacts: ChatContact[];
   sessions: ChatSession[];
   messages: ChatMessage[];
+  storySessions: StorySession[];
+  storyMessages: StoryMessage[];
   mediaIds: string[];
   moments: MomentPost[];
   momentComments: MomentComment[];
@@ -140,6 +145,8 @@ export interface NativeMigrationReconciliation {
   worldbooks: DomainReconciliation<WorldBookConfig>;
   calendar: DomainReconciliation<CalendarWeekPlan>;
   memories: DomainReconciliation<MemoryEntry>;
+  storySessions: DomainReconciliation<StorySession>;
+  storyMessages: DomainReconciliation<StoryMessage>;
   archive: "create" | "reuse" | "conflict";
   idMap: "create" | "reuse" | "conflict";
   totals: { create: number; reuse: number; skip: number; conflicts: number };
@@ -166,6 +173,10 @@ export interface NativeMigrationDryRun {
   reconciliation: NativeMigrationReconciliation;
   summary: {
     characters: number;
+    sourceMessages: number;
+    chatMessages: number;
+    storyMessages: number;
+    storySessions: number;
     messages: number;
     assets: number;
     moments: number;

@@ -116,14 +116,14 @@ try {
   class FakeStorage {
     kind = "isolated-browser";
     journals = new Map();
-    snapshot = { identities: [], characters: [{ id: "preexisting-char", name: "Preexisting", avatar: null, persona: "keep", wechatID: "19900000000", tags: [], createdAt, updatedAt: createdAt }], contacts: [], sessions: [], messages: [], mediaIds: [], moments: [], momentComments: [], diaries: [], worlds: [], worldbooks: [], calendar: [], memories: [] };
+    snapshot = { identities: [], characters: [{ id: "preexisting-char", name: "Preexisting", avatar: null, persona: "keep", wechatID: "19900000000", tags: [], createdAt, updatedAt: createdAt }], contacts: [], sessions: [], messages: [], storySessions: [], storyMessages: [], mediaIds: [], moments: [], momentComments: [], diaries: [], worlds: [], worldbooks: [], calendar: [], memories: [] };
     async saveJournal(journal) { this.journals.set(journal.runId, structuredClone(journal)); }
     async readJournal(runId) { const v = this.journals.get(runId); return v ? structuredClone(v) : null; }
     async readSnapshot() { return structuredClone(this.snapshot); }
     async applyCreates(plan, r, pkg) {
       const created = {};
       const add = (key, values, idField = "id") => { if (!values.length) return; this.snapshot[key].push(...structuredClone(values)); created[key] = values.map(v => v[idField]); };
-      add("identities", r.identities.create); add("characters", r.characters.create); add("contacts", r.contacts.create); add("sessions", r.sessions.create); add("messages", r.messages.create);
+      add("identities", r.identities.create); add("characters", r.characters.create); add("contacts", r.contacts.create); add("sessions", r.sessions.create); add("messages", r.messages.create); add("storySessions", r.storySessions.create); add("storyMessages", r.storyMessages.create);
       if (r.media.create.length) { for (const media of r.media.create) assert.ok(await pkg.getAssetBytes(media.sourceAssetId)); this.snapshot.mediaIds.push(...r.media.create.map(x => x.targetId)); created.media = r.media.create.map(x => x.targetId); }
       add("moments", r.moments.create); add("momentComments", r.momentComments.create); add("diaries", r.diaries.create); add("worlds", r.worlds.create); add("worldbooks", r.worldbooks.create); add("calendar", r.calendar.create); add("memories", r.memories.create);
       if (r.archive === "create") { this.snapshot.archive = structuredClone(plan.archive); created.archive = ["archive"]; }
@@ -132,7 +132,7 @@ try {
     }
     async rollbackCreated(journal) {
       const rm = (key, ids, idField = "id") => { if (!ids?.length) return; const set = new Set(ids); this.snapshot[key] = this.snapshot[key].filter(v => !set.has(v[idField])); };
-      rm("identities", journal.created.identities); rm("characters", journal.created.characters); rm("contacts", journal.created.contacts); rm("sessions", journal.created.sessions); rm("messages", journal.created.messages);
+      rm("identities", journal.created.identities); rm("characters", journal.created.characters); rm("contacts", journal.created.contacts); rm("sessions", journal.created.sessions); rm("messages", journal.created.messages); rm("storySessions", journal.created.storySessions); rm("storyMessages", journal.created.storyMessages);
       if (journal.created.media?.length) this.snapshot.mediaIds = this.snapshot.mediaIds.filter(id => !new Set(journal.created.media).has(id));
       rm("moments", journal.created.moments); rm("momentComments", journal.created.momentComments); rm("diaries", journal.created.diaries); rm("worlds", journal.created.worlds); rm("worldbooks", journal.created.worldbooks); rm("calendar", journal.created.calendar); rm("memories", journal.created.memories);
       if (journal.created.archive?.length) delete this.snapshot.archive; if (journal.created.idMap?.length) delete this.snapshot.idMap;

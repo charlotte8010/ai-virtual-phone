@@ -74,7 +74,7 @@ try {
   const declaredMissingBytes = await writeFloatMigrationPackage({ manifest: missingMediaManifest, payload: missingMediaPayload, binaryAssets: [{ ref: declaredMissingAsset }] });
   const fakeStorage = {
     kind: "isolated-browser",
-    async readSnapshot() { return { identities: [], characters: [], contacts: [], sessions: [], messages: [], mediaIds: [], moments: [], momentComments: [], diaries: [], worlds: [], worldbooks: [], calendar: [], memories: [] }; },
+    async readSnapshot() { return { identities: [], characters: [], contacts: [], sessions: [], messages: [], storySessions: [], storyMessages: [], mediaIds: [], moments: [], momentComments: [], diaries: [], worlds: [], worldbooks: [], calendar: [], memories: [] }; },
     async applyCreates() { throw new Error("not used"); }, async rollbackCreated() { throw new Error("not used"); }, async saveJournal() {}, async readJournal() { return null; },
   };
   const dry = await dryRunFloatMigrationPackage(declaredMissingBytes, { storage: fakeStorage });

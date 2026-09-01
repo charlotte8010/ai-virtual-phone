@@ -2,6 +2,7 @@ import Dexie from "dexie";
 import type { Table } from "dexie";
 import type { Character } from "../../character-types";
 import type { ChatContact, ChatMessage, ChatSession } from "../../chat-storage";
+import type { StoryMessage, StorySession } from "../../story-storage";
 import { chatDb } from "../../chat-db";
 import type { MomentComment, MomentPost } from "../../moments-types";
 import { momentsDb } from "../../moments-db";
@@ -107,6 +108,19 @@ class MigrationKvDatabase extends Dexie {
   }
 }
 
+class MigrationStoryDatabase extends Dexie {
+  sessions!: Table<StorySession, string>;
+  messages!: Table<StoryMessage, string>;
+
+  constructor(name = "AiPhoneStoryDB") {
+    super(name);
+    this.version(1).stores({
+      sessions: "id, characterId, updatedAt",
+      messages: "id, sessionId, createdAt",
+    });
+  }
+}
+
 export interface NativeMigrationApplyStorageResult {
   created: MigrationRunJournal["created"];
   warnings: string[];
@@ -152,16 +166,20 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
     this.requireHydratedKv();
     const calendarStore = parseObject<{ plans?: CalendarWeekPlan[] }>(kvGet(CALENDAR_KEY));
     const settingsDb = new MigrationSettingsDatabase();
-    const [contacts, sessions, messages, moments, momentComments, media, worldbooks] = await Promise.all([
+    const storyDb = new MigrationStoryDatabase();
+    const [contacts, sessions, messages, storySessions, storyMessages, moments, momentComments, media, worldbooks] = await Promise.all([
       chatDb.contacts.toArray(),
       chatDb.sessions.toArray(),
       chatDb.messages.toArray(),
+      storyDb.sessions.toArray(),
+      storyDb.messages.toArray(),
       momentsDb.posts.toArray(),
       momentsDb.comments.toArray(),
       listMediaCacheSummaries(),
       settingsDb.worldBooks.toArray().catch(() => [] as WorldBookConfig[]),
     ]);
     settingsDb.close();
+    storyDb.close();
 
     const memoryCharacterIds = [...new Set(plan.memories.map((entry) => entry.characterId))];
     const memories: MemoryEntry[] = [];
@@ -175,6 +193,8 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
       contacts,
       sessions,
       messages,
+      storySessions,
+      storyMessages,
       mediaIds: media.map((entry) => entry.id),
       moments,
       momentComments,
@@ -224,6 +244,17 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
         if (reconciliation.contacts.create.length) created.contacts = ids(reconciliation.contacts.create, (entry) => entry.id);
         if (reconciliation.sessions.create.length) created.sessions = ids(reconciliation.sessions.create, (entry) => entry.id);
         if (reconciliation.messages.create.length) created.messages = ids(reconciliation.messages.create, (entry) => entry.id);
+      }
+
+      if (reconciliation.storySessions.create.length || reconciliation.storyMessages.create.length) {
+        const db = new MigrationStoryDatabase();
+        await db.transaction("rw", db.sessions, db.messages, async () => {
+          if (reconciliation.storySessions.create.length) await db.sessions.bulkPut(reconciliation.storySessions.create);
+          if (reconciliation.storyMessages.create.length) await db.messages.bulkPut(reconciliation.storyMessages.create);
+        });
+        if (reconciliation.storySessions.create.length) created.storySessions = ids(reconciliation.storySessions.create, (entry) => entry.id);
+        if (reconciliation.storyMessages.create.length) created.storyMessages = ids(reconciliation.storyMessages.create, (entry) => entry.id);
+        db.close();
       }
 
       if (reconciliation.media.create.length) {
@@ -322,6 +353,15 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
         });
       }
 
+      if ((journal.created.storySessions?.length ?? 0) || (journal.created.storyMessages?.length ?? 0)) {
+        const db = new MigrationStoryDatabase();
+        await db.transaction("rw", db.sessions, db.messages, async () => {
+          if (journal.created.storyMessages?.length) await db.messages.bulkDelete(journal.created.storyMessages);
+          if (journal.created.storySessions?.length) await db.sessions.bulkDelete(journal.created.storySessions);
+        });
+        db.close();
+      }
+
       if (journal.created.media?.length) {
         const db = new MigrationMediaDatabase();
         await db.entries.bulkDelete(journal.created.media);
@@ -375,6 +415,8 @@ class IsolatedMigrationDatabase extends Dexie {
   contacts!: Table<ChatContact, string>;
   sessions!: Table<ChatSession, string>;
   messages!: Table<ChatMessage, string>;
+  storySessions!: Table<StorySession, string>;
+  storyMessages!: Table<StoryMessage, string>;
   media!: Table<MediaCacheEntry, string>;
   moments!: Table<MomentPost, string>;
   momentComments!: Table<MomentComment, string>;
@@ -393,6 +435,8 @@ class IsolatedMigrationDatabase extends Dexie {
       contacts: "id, characterId",
       sessions: "id, contactId",
       messages: "id, sessionId, createdAt",
+      storySessions: "id, characterId, updatedAt",
+      storyMessages: "id, sessionId, createdAt",
       media: "id, createdAt",
       moments: "id, authorId, createdAt",
       momentComments: "id, postId, createdAt",
@@ -423,6 +467,8 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
     if (snapshot.contacts?.length) await this.db.contacts.bulkPut(snapshot.contacts);
     if (snapshot.sessions?.length) await this.db.sessions.bulkPut(snapshot.sessions);
     if (snapshot.messages?.length) await this.db.messages.bulkPut(snapshot.messages);
+    if (snapshot.storySessions?.length) await this.db.storySessions.bulkPut(snapshot.storySessions);
+    if (snapshot.storyMessages?.length) await this.db.storyMessages.bulkPut(snapshot.storyMessages);
     if (snapshot.moments?.length) await this.db.moments.bulkPut(snapshot.moments);
     if (snapshot.momentComments?.length) await this.db.momentComments.bulkPut(snapshot.momentComments);
     if (snapshot.diaries?.length) await this.db.diaries.bulkPut(snapshot.diaries);
@@ -443,7 +489,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
 
   async readSnapshot(plan: NativeMigrationPlan): Promise<NativeMigrationSnapshot> {
     const [
-      identities, characters, contacts, sessions, messages, media, moments, momentComments,
+      identities, characters, contacts, sessions, messages, storySessions, storyMessages, media, moments, momentComments,
       diaries, worlds, worldbooks, calendar, memories, archiveRow, idMapRow,
     ] = await Promise.all([
       this.db.identities.toArray(),
@@ -451,6 +497,8 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
       this.db.contacts.toArray(),
       this.db.sessions.toArray(),
       this.db.messages.toArray(),
+      this.db.storySessions.toArray(),
+      this.db.storyMessages.toArray(),
       this.db.media.toArray(),
       this.db.moments.toArray(),
       this.db.momentComments.toArray(),
@@ -469,6 +517,8 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
       contacts,
       sessions,
       messages,
+      storySessions,
+      storyMessages,
       mediaIds: media.map((entry) => entry.id),
       moments,
       momentComments,
@@ -496,6 +546,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
         "rw",
         [
           this.db.identities, this.db.characters, this.db.contacts, this.db.sessions, this.db.messages,
+          this.db.storySessions, this.db.storyMessages,
           this.db.moments, this.db.momentComments, this.db.diaries, this.db.worlds, this.db.worldbooks,
           this.db.calendar, this.db.memories, this.db.meta,
         ],
@@ -511,6 +562,8 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
           await put(this.db.contacts, reconciliation.contacts.create, "contacts");
           await put(this.db.sessions, reconciliation.sessions.create, "sessions");
           await put(this.db.messages, reconciliation.messages.create, "messages");
+          await put(this.db.storySessions, reconciliation.storySessions.create, "storySessions");
+          await put(this.db.storyMessages, reconciliation.storyMessages.create, "storyMessages");
           await put(this.db.moments, reconciliation.moments.create, "moments");
           await put(this.db.momentComments, reconciliation.momentComments.create, "momentComments");
           await put(this.db.diaries, reconciliation.diaries.create, "diaries");
@@ -569,6 +622,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
         "rw",
         [
           this.db.identities, this.db.characters, this.db.contacts, this.db.sessions, this.db.messages,
+          this.db.storySessions, this.db.storyMessages,
           this.db.media, this.db.moments, this.db.momentComments, this.db.diaries, this.db.worlds,
           this.db.worldbooks, this.db.calendar, this.db.memories, this.db.meta,
         ],
@@ -582,6 +636,8 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
           await del(this.db.contacts, journal.created.contacts);
           await del(this.db.sessions, journal.created.sessions);
           await del(this.db.messages, journal.created.messages);
+          await del(this.db.storyMessages, journal.created.storyMessages);
+          await del(this.db.storySessions, journal.created.storySessions);
           await del(this.db.media, journal.created.media);
           await del(this.db.moments, journal.created.moments);
           await del(this.db.momentComments, journal.created.momentComments);

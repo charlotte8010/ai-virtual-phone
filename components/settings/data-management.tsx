@@ -106,7 +106,10 @@ const ALL_MODULE_IDS = DATA_MODULES.map((module) => module.id);
 
 const MIGRATION_SUMMARY_FIELDS = [
   ["characters", "characters"],
-  ["messages", "messages"],
+  ["sourceMessages", "Source Messages"],
+  ["messages", "Chat Messages"],
+  ["storyMessages", "Story Messages"],
+  ["storySessions", "Story Sessions"],
   ["assets", "assets"],
   ["moments", "moments"],
   ["comments", "comments"],

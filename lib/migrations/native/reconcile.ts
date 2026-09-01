@@ -56,6 +56,48 @@ function totalsOf(parts: Array<DomainReconciliation<unknown>>): NativeMigrationR
   }), { create: 0, reuse: 0, skip: 0, conflicts: 0 });
 }
 
+function reconcileStorySessions(
+  planned: NativeMigrationPlan["storySessions"],
+  existing: NativeMigrationSnapshot["storySessions"],
+): { reconciliation: NativeMigrationReconciliation["storySessions"]; actualIdByPlannedId: Map<string, string> } {
+  const existingById = new Map(existing.map((value) => [value.id, value]));
+  const existingByCharacter = new Map<string, NativeMigrationSnapshot["storySessions"][number]>();
+  for (const value of existing) if (!existingByCharacter.has(value.characterId)) existingByCharacter.set(value.characterId, value);
+  const create: NativeMigrationSnapshot["storySessions"] = [];
+  const reuse: NativeMigrationSnapshot["storySessions"] = [];
+  const skip: NativeMigrationSnapshot["storySessions"] = [];
+  const conflicts: Array<{ planned: NativeMigrationSnapshot["storySessions"][number]; existing: NativeMigrationSnapshot["storySessions"][number]; reason: string }> = [];
+  const actualIdByPlannedId = new Map<string, string>();
+  const seen = new Set<string>();
+
+  for (const value of planned) {
+    if (!value.id || seen.has(value.id)) {
+      skip.push(value);
+      continue;
+    }
+    seen.add(value.id);
+    const byCharacter = existingByCharacter.get(value.characterId);
+    if (byCharacter) {
+      reuse.push(byCharacter);
+      actualIdByPlannedId.set(value.id, byCharacter.id);
+      continue;
+    }
+    const byId = existingById.get(value.id);
+    if (!byId) {
+      create.push(value);
+      actualIdByPlannedId.set(value.id, value.id);
+      continue;
+    }
+    if (stableValue(byId) === stableValue(value)) {
+      reuse.push(byId);
+      actualIdByPlannedId.set(value.id, byId.id);
+    } else {
+      conflicts.push({ planned: value, existing: byId, reason: `target id ${value.id} already exists for another character` });
+    }
+  }
+  return { reconciliation: { create, reuse, skip, conflicts }, actualIdByPlannedId };
+}
+
 export function reconcileNativeMigrationPlan(plan: NativeMigrationPlan, existing: NativeMigrationSnapshot): NativeMigrationReconciliation {
   const identities = reconcileRecords(plan.identities.map((entry) => entry.value), existing.identities, (entry) => entry.id);
   const characters = reconcileRecords(plan.characters.map((entry) => entry.value), existing.characters, (entry) => entry.id);
@@ -81,6 +123,13 @@ export function reconcileNativeMigrationPlan(plan: NativeMigrationPlan, existing
   const worldbooks = reconcileRecords(plan.worldbooks, existing.worldbooks, (entry) => entry.id);
   const calendar = reconcileRecords(plan.calendar, existing.calendar, (entry) => entry.id);
   const memories = reconcileRecords(plan.memories, existing.memories, (entry) => entry.id);
+  const storySessionResult = reconcileStorySessions(plan.storySessions, existing.storySessions);
+  const remappedStoryMessages = plan.storyMessages.map((message) => {
+    const sessionId = storySessionResult.actualIdByPlannedId.get(message.sessionId);
+    if (!sessionId) throw new Error(`cannot reconcile StoryMessage ${message.id}: StorySession ${message.sessionId} is conflicted`);
+    return sessionId === message.sessionId ? message : { ...message, sessionId };
+  });
+  const storyMessages = reconcileRecords(remappedStoryMessages, existing.storyMessages, (entry) => entry.id);
   const archive = existing.archive === undefined
     ? "create"
     : stableValue(existing.archive) === stableValue(plan.archive) ? "reuse" : "conflict";
@@ -89,7 +138,7 @@ export function reconcileNativeMigrationPlan(plan: NativeMigrationPlan, existing
     : stableValue(existing.idMap) === stableValue(plan.idMap) ? "reuse" : "conflict";
   const parts: Array<DomainReconciliation<unknown>> = [
     identities, characters, contacts, sessions, messages, media, moments, momentComments,
-    diaries, worlds, worldbooks, calendar, memories,
+    diaries, worlds, worldbooks, calendar, memories, storySessionResult.reconciliation, storyMessages,
   ];
   const totals = totalsOf(parts);
   totals.create += archive === "create" ? 1 : 0;
@@ -98,5 +147,11 @@ export function reconcileNativeMigrationPlan(plan: NativeMigrationPlan, existing
   totals.create += idMap === "create" ? 1 : 0;
   totals.reuse += idMap === "reuse" ? 1 : 0;
   totals.conflicts += idMap === "conflict" ? 1 : 0;
-  return { identities, characters, contacts, sessions, messages, media, moments, momentComments, diaries, worlds, worldbooks, calendar, memories, archive, idMap, totals };
+  return {
+    identities, characters, contacts, sessions, messages, media, moments, momentComments, diaries,
+    worlds, worldbooks, calendar, memories,
+    storySessions: storySessionResult.reconciliation,
+    storyMessages,
+    archive, idMap, totals,
+  };
 }
