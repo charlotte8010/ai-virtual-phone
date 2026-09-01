@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   applyFloatMigrationPackage,
   dryRunFloatMigrationPackage,
@@ -208,6 +208,7 @@ export default function MigrationCompletionValidationPage() {
   const [running, setRunning] = useState(false);
   const [currentStage, setCurrentStage] = useState<string | null>(null);
   const [lastCompletedStage, setLastCompletedStage] = useState<string | null>(null);
+  const lastCompletedStageRef = useRef<string | null>(null);
   const [stageEntries, setStageEntries] = useState<ValidationStageEntry[]>([]);
 
   async function runStage<T>(stage: string, timeoutMs: number, action: () => Promise<T>): Promise<T> {
@@ -228,7 +229,7 @@ export default function MigrationCompletionValidationPage() {
     const timeoutId = window.setTimeout(() => {
       timedOut = true;
       const elapsedMs = update("timed_out");
-      setError(`validation timeout at stage "${stage}" after ${elapsedMs}ms; last completed stage: ${lastCompletedStage ?? "none"}`);
+      setError(`validation timeout at stage "${stage}" after ${elapsedMs}ms; last completed stage: ${lastCompletedStageRef.current ?? "none"}`);
     }, timeoutMs);
 
     try {
@@ -237,6 +238,7 @@ export default function MigrationCompletionValidationPage() {
         throw new Error(`validation timeout at stage "${stage}"; last completed stage: ${lastCompletedStage ?? "none"}`);
       }
       update("completed");
+      lastCompletedStageRef.current = stage;
       setLastCompletedStage(stage);
       return value;
     } catch (cause) {
@@ -254,6 +256,7 @@ export default function MigrationCompletionValidationPage() {
     setResult(null);
     setError("");
     setCurrentStage(null);
+    lastCompletedStageRef.current = null;
     setLastCompletedStage(null);
     setStageEntries([]);
 
