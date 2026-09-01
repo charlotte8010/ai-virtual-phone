@@ -109,6 +109,7 @@ export async function updateMemoryRecallStats(
     characterId: string,
     memoryIds: readonly string[],
     recalledAt: string,
+    memoryStabilityEnabled?: boolean,
 ): Promise<void> {
     const selectedIds = new Set(memoryIds);
     if (selectedIds.size === 0) return;
@@ -128,7 +129,7 @@ export async function updateMemoryRecallStats(
             if (entry.characterId !== characterId || entry.type !== "long_term" || !selectedIds.has(entry.id)) {
                 continue;
             }
-            store.put(applyRecallStats(normalizeMemoryEntry(entry), recalledAt));
+            store.put(applyRecallStats(normalizeMemoryEntry(entry), recalledAt, { memoryStabilityEnabled }));
         }
         await new Promise<void>((resolve, reject) => {
             tx.oncomplete = () => resolve();

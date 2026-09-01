@@ -393,6 +393,14 @@ function wrapXml(tag: string, content: string): string {
     return `<${tag}>\n${content}\n</${tag}>`;
 }
 
+function hasEffectiveLongTermMemory(content: string): boolean {
+    return content.replace(/<\/?memoryLongTerm\b[^>]*>/gi, "").trim().length > 0;
+}
+
+function normalizeRecallGateText(content: string): string {
+    return content.replace(/\s+/g, "");
+}
+
 // ── Helper: get content for a marker entry ──
 function applyWorldInfoRegex(text: string, regexGroups: RegexConfig[], ctx?: RegexContext): string {
     return applyRegex(text, regexGroups, 5, { isPrompt: true, ...ctx });
@@ -777,7 +785,6 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                     markerContent = engine.expand(markerContent);
                     markerContent = postProcessTrim(markerContent).trim();
                     if (markerContent) {
-                        if (p.identifier === "memoryLongTerm") longTermMemoryInjected = true;
                         const xmlText = wrapXml(toXmlTag(p.identifier), markerContent);
                         if (afterChatHistory) {
                             blocks.push({
@@ -1102,6 +1109,10 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                 name: b.toolName,
                 _debugMeta: { marker: b.marker, depth: b.depth, order: b.order, _fromHistory: b.fromHistory },
             });
+        }
+
+        if (b.marker === "memoryLongTerm" && hasEffectiveLongTermMemory(processedText)) {
+            longTermMemoryInjected = true;
         }
     });
 
@@ -1800,6 +1811,11 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
     const atDepthInjections: { entry: WorldBookEntry; engine: MacroEngine }[] = [];
     const sharedAfterBlocks: { text: string; marker: string }[] = [];
     const longTermMemoryCallbacks: Array<() => void> = [];
+    const longTermMemoryGateInputs = new WeakMap<PromptBlock, {
+        withMemory: string;
+        withoutMemory: string;
+        callback?: () => void;
+    }>();
 
     const seenSharedBooks = new Set<string>();
     for (const m of members) {
@@ -1894,7 +1910,8 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
 
         // Build member content by iterating preset markers in order
         const sections: string[] = [];
-        let longTermMemoryInjected = false;
+        const sectionsWithoutLongTermMemory: string[] = [];
+        let hasLongTermMemorySection = false;
 
         if (preset) {
             for (const p of processingOrder) {
@@ -1923,8 +1940,12 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                     markerContent = engine.expand(markerContent);
                     markerContent = postProcessTrim(markerContent).trim();
                     if (markerContent) {
-                        if (p.identifier === "memoryLongTerm") longTermMemoryInjected = true;
                         sections.push(markerContent);
+                        if (p.identifier === "memoryLongTerm") {
+                            hasLongTermMemorySection = true;
+                        } else {
+                            sectionsWithoutLongTermMemory.push(markerContent);
+                        }
                     }
                 }
             }
@@ -1937,16 +1958,24 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
         ].join("\n");
         const memberContent = postProcessTrim([stateSection, ...sections].filter(Boolean).join("\n\n")).trim();
         if (memberContent) {
-            blocks.push({
+            const memberBlock: PromptBlock = {
                 text: `<member name="${char.name}">\n${memberContent}\n</member>`,
                 role: "system",
                 depth: beforeHistoryDepth,
                 order: orderIdx++,
                 marker: `member:${char.name}`,
-            });
-        }
-        if (longTermMemoryInjected && m.onLongTermMemoriesInjected) {
-            longTermMemoryCallbacks.push(m.onLongTermMemoriesInjected);
+            };
+            blocks.push(memberBlock);
+            if (hasLongTermMemorySection) {
+                const memberContentWithoutLongTermMemory = postProcessTrim(
+                    [stateSection, ...sectionsWithoutLongTermMemory].filter(Boolean).join("\n\n"),
+                ).trim();
+                longTermMemoryGateInputs.set(memberBlock, {
+                    withMemory: memberBlock.text,
+                    withoutMemory: `<member name="${char.name}">\n${memberContentWithoutLongTermMemory}\n</member>`,
+                    callback: m.onLongTermMemoriesInjected,
+                });
+            }
         }
     }
 
@@ -2222,6 +2251,10 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
             ? { depth: b.depth, activeTags, history: true }
             : { activeTags };
         const processedText = b.role === "tool" ? b.text : applyInputRegex(b.text, regexes, inputCtx);
+        const gateInput = longTermMemoryGateInputs.get(b);
+        const processedTextWithoutLongTermMemory = gateInput
+            ? applyInputRegex(gateInput.withoutMemory, regexes, inputCtx)
+            : "";
         const carriesNativeToolData = b.role === "tool" || Boolean(b.toolCalls?.length);
 
         const canMerge = b.fromHistory && finalPayload.length > 0 &&
@@ -2263,6 +2296,13 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                 name: b.toolName,
                 _debugMeta: { marker: b.marker, depth: b.depth, order: b.order, _fromHistory: b.fromHistory },
             });
+        }
+
+        if (
+            gateInput?.callback
+            && normalizeRecallGateText(processedText) !== normalizeRecallGateText(processedTextWithoutLongTermMemory)
+        ) {
+            longTermMemoryCallbacks.push(gateInput.callback);
         }
     });
 

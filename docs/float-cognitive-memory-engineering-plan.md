@@ -3517,7 +3517,9 @@ hotNewsSnapshots
 
 ---
 
-## Commit 8 — Recall Stats & Stability
+## C5 — Recall Stats & Stability
+
+> 当前 C5 对应旧 unified roadmap 的 Commit 8；仅作编号说明。
 
 只有真正注入角色 Prompt 的记忆才：
 

@@ -253,6 +253,7 @@ export async function commitMemoryRecall(
             characterId,
             selectedIds,
             options.recalledAt ?? new Date().toISOString(),
+            loadMemoryConfig().memoryStabilityEnabled,
         );
     } catch (error) {
         console.warn("[MemoryService] Recall stats write failed; continuing without blocking prompt", error);

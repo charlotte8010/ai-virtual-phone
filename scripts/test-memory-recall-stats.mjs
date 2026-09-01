@@ -18,8 +18,8 @@ const mockSources = new Map([
         export async function loadMemoryEntriesByType(characterId, type) {
             return globalThis.__testMemories.filter(entry => entry.characterId === characterId && entry.type === type);
         }
-        export async function updateMemoryRecallStats(characterId, memoryIds, recalledAt) {
-            globalThis.__recallWrites.push({ characterId, memoryIds: [...memoryIds], recalledAt });
+        export async function updateMemoryRecallStats(characterId, memoryIds, recalledAt, memoryStabilityEnabled) {
+            globalThis.__recallWrites.push({ characterId, memoryIds: [...memoryIds], recalledAt, memoryStabilityEnabled });
             if (globalThis.__failRecallWrites) throw new Error("simulated IndexedDB failure");
         }
     `],
@@ -137,6 +137,11 @@ assert.equal(selectedAfterRecall.accessCount, 1);
 assert.equal(selectedAfterRecall.lastAccessedAt, "2026-09-01T12:00:00.000Z");
 assert.ok(selectedAfterRecall.stability > 0);
 
+context.__testConfig = { ...config, memoryStabilityEnabled: false };
+await commitMemoryRecall("char-1", ["selected"], { recalledAt: "2026-09-01T12:00:00.000Z" });
+assert.equal(context.__recallWrites.at(-1).memoryStabilityEnabled, false, "the config flag must reach recall stats persistence");
+context.__testConfig = config;
+
 const legacyAfterRecall = applyRecallStats(memory("legacy", { importance: 0.5 }), "2026-09-01T12:00:00.000Z");
 assert.equal(legacyAfterRecall.accessCount, 1, "legacy accessCount defaults to zero before increment");
 assert.equal(legacyAfterRecall.lastAccessedAt, "2026-09-01T12:00:00.000Z");
@@ -150,6 +155,13 @@ const existingStatsAfterRecall = applyRecallStats(memory("existing", {
 }), "2026-09-01T12:00:00.000Z");
 assert.equal(existingStatsAfterRecall.accessCount, 4);
 assert.ok(Math.abs(existingStatsAfterRecall.stability - 0.415) < 1e-9);
+const stabilityDisabledAfterRecall = applyRecallStats(memory("stability-disabled", {
+    accessCount: 3,
+    stability: 0.4,
+}), "2026-09-01T12:00:00.000Z", { memoryStabilityEnabled: false });
+assert.equal(stabilityDisabledAfterRecall.accessCount, 4);
+assert.equal(stabilityDisabledAfterRecall.lastAccessedAt, "2026-09-01T12:00:00.000Z");
+assert.equal(stabilityDisabledAfterRecall.stability, 0.4, "disabled stability must not receive a reinforcement boost");
 assert.equal(applyRecallStats(memory("bounded", { accessCount: 99, stability: 0.999 }), "now").stability, 1);
 
 const futureIntent = memory("intent", {

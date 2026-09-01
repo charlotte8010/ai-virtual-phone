@@ -23,22 +23,33 @@ export function getRecallStabilityBoost(accessCount: number): number {
     return 0.005;
 }
 
+export type RecallStatsOptions = {
+    memoryStabilityEnabled?: boolean;
+};
+
 /** Apply one successful prompt recall without changing memory chronology or lifecycle. */
-export function applyRecallStats(memory: MemoryEntry, recalledAt: string): MemoryEntry {
+export function applyRecallStats(
+    memory: MemoryEntry,
+    recalledAt: string,
+    options: RecallStatsOptions = {},
+): MemoryEntry {
     const accessCount = normalizeAccessCount(memory.accessCount) + 1;
     const currentStability = Number.isFinite(memory.stability)
         ? clamp(memory.stability as number, MIN_STABILITY, MAX_STABILITY)
         : getInitialStability(memory);
+    const stability = options.memoryStabilityEnabled === false
+        ? currentStability
+        : clamp(
+            currentStability + getRecallStabilityBoost(accessCount),
+            MIN_STABILITY,
+            MAX_STABILITY,
+        );
 
     return {
         ...memory,
         accessCount,
         lastAccessedAt: recalledAt,
-        stability: clamp(
-            currentStability + getRecallStabilityBoost(accessCount),
-            MIN_STABILITY,
-            MAX_STABILITY,
-        ),
+        stability,
     };
 }
 
