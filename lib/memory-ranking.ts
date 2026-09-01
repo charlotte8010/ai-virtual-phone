@@ -39,6 +39,26 @@ export interface RankedMemoryCandidate {
     tokenCost: number;
 }
 
+export type MemorySelectionDecisionReason =
+    | "protected_priority"
+    | "ranked"
+    | "max_selected"
+    | "protected_limit"
+    | "token_budget"
+    | "diversity_limit"
+    | "lower_rank";
+
+export interface MemorySelectionDecision {
+    candidate: RankedMemoryCandidate;
+    selected: boolean;
+    reason: MemorySelectionDecisionReason;
+}
+
+export interface RankedMemorySelectionTrace {
+    selected: RankedMemoryCandidate[];
+    decisions: MemorySelectionDecision[];
+}
+
 export interface MemoryRankingOptions {
     now?: Date | string;
     timezone?: string;
@@ -319,17 +339,106 @@ export function rankMemoryCandidates(
         });
 }
 
-function canAddCandidate(
+function getSelectionRejectionReason(
     candidate: RankedMemoryCandidate,
     selected: RankedMemoryCandidate[],
     usedTokens: number,
     tokenBudget: number,
     maxPerCluster: number,
-): boolean {
-    if (usedTokens + candidate.tokenCost > tokenBudget) return false;
-    if (!candidate.clusterKey) return true;
+): Exclude<MemorySelectionDecisionReason, "protected_priority" | "ranked" | "lower_rank"> | undefined {
+    if (usedTokens + candidate.tokenCost > tokenBudget) return "token_budget";
+    if (!candidate.clusterKey) return undefined;
     const clusterCount = selected.filter(item => item.clusterKey === candidate.clusterKey).length;
-    return clusterCount < maxPerCluster;
+    return clusterCount < maxPerCluster ? undefined : "diversity_limit";
+}
+
+function selectRankedMemoryCandidatesInternal(
+    ranked: RankedMemoryCandidate[],
+    options: MemorySelectionOptions = {},
+): RankedMemorySelectionTrace {
+    const rawBudget = options.tokenBudget ?? options.longTermTokenBudget ?? Number.POSITIVE_INFINITY;
+    const tokenBudget = Number.isFinite(rawBudget) ? Math.max(0, rawBudget) : Number.POSITIVE_INFINITY;
+    const maxSelected = Math.max(0, Math.floor(options.maxSelectedLongTermMemories ?? options.maxSelected ?? DEFAULT_MAX_SELECTED));
+    const maxProtected = Math.max(0, Math.floor(options.maxProtectedFutureIntents ?? DEFAULT_MAX_PROTECTED));
+    const maxPerCluster = Math.max(1, Math.floor(options.maxPerCluster ?? DEFAULT_MAX_PER_CLUSTER));
+    const decisions = new Map<string, MemorySelectionDecision>();
+    if (maxSelected === 0 || tokenBudget === 0) {
+        const reason = maxSelected === 0 ? "max_selected" : "token_budget";
+        return {
+            selected: [],
+            decisions: ranked.map(candidate => ({ candidate, selected: false, reason })),
+        };
+    }
+
+    const selected: RankedMemoryCandidate[] = [];
+    const selectedIds = new Set<string>();
+    let usedTokens = 0;
+    let protectedCount = 0;
+
+    const recordRejection = (
+        candidate: RankedMemoryCandidate,
+        reason: Exclude<MemorySelectionDecisionReason, "protected_priority" | "ranked">,
+    ): void => {
+        if (!decisions.has(candidate.memory.id)) {
+            decisions.set(candidate.memory.id, { candidate, selected: false, reason });
+        }
+    };
+
+    const tryAdd = (
+        candidate: RankedMemoryCandidate,
+        selectedReason: "protected_priority" | "ranked",
+    ): void => {
+        if (selectedIds.has(candidate.memory.id)) return;
+        if (selected.length >= maxSelected) {
+            recordRejection(candidate, "max_selected");
+            return;
+        }
+        const rejectionReason = getSelectionRejectionReason(
+            candidate,
+            selected,
+            usedTokens,
+            tokenBudget,
+            maxPerCluster,
+        );
+        if (rejectionReason) {
+            recordRejection(candidate, rejectionReason);
+            return;
+        }
+        selected.push(candidate);
+        selectedIds.add(candidate.memory.id);
+        usedTokens += candidate.tokenCost;
+        if (candidate.protectedReason) protectedCount += 1;
+        decisions.set(candidate.memory.id, { candidate, selected: true, reason: selectedReason });
+    };
+
+    for (const candidate of ranked.filter(item => item.protectedReason)) {
+        if (protectedCount >= maxProtected) {
+            recordRejection(candidate, "protected_limit");
+            break;
+        }
+        tryAdd(candidate, "protected_priority");
+    }
+    for (const candidate of ranked) {
+        if (candidate.protectedReason && protectedCount >= maxProtected) {
+            recordRejection(candidate, "protected_limit");
+            continue;
+        }
+        tryAdd(candidate, "ranked");
+        if (selected.length >= maxSelected) break;
+    }
+
+    for (const candidate of ranked) {
+        if (decisions.has(candidate.memory.id)) continue;
+        recordRejection(
+            candidate,
+            selected.length >= maxSelected ? "max_selected" : "lower_rank",
+        );
+    }
+
+    return {
+        selected,
+        decisions: ranked.map(candidate => decisions.get(candidate.memory.id) as MemorySelectionDecision),
+    };
 }
 
 /** Select after ranking; a long candidate never blocks later short candidates. */
@@ -337,35 +446,13 @@ export function selectRankedMemoryCandidates(
     ranked: RankedMemoryCandidate[],
     options: MemorySelectionOptions = {},
 ): RankedMemoryCandidate[] {
-    const rawBudget = options.tokenBudget ?? options.longTermTokenBudget ?? Number.POSITIVE_INFINITY;
-    const tokenBudget = Number.isFinite(rawBudget) ? Math.max(0, rawBudget) : Number.POSITIVE_INFINITY;
-    const maxSelected = Math.max(0, Math.floor(options.maxSelectedLongTermMemories ?? options.maxSelected ?? DEFAULT_MAX_SELECTED));
-    const maxProtected = Math.max(0, Math.floor(options.maxProtectedFutureIntents ?? DEFAULT_MAX_PROTECTED));
-    const maxPerCluster = Math.max(1, Math.floor(options.maxPerCluster ?? DEFAULT_MAX_PER_CLUSTER));
-    if (maxSelected === 0 || tokenBudget === 0) return [];
+    return selectRankedMemoryCandidatesInternal(ranked, options).selected;
+}
 
-    const selected: RankedMemoryCandidate[] = [];
-    const selectedIds = new Set<string>();
-    let usedTokens = 0;
-    let protectedCount = 0;
-
-    const tryAdd = (candidate: RankedMemoryCandidate): void => {
-        if (selected.length >= maxSelected || selectedIds.has(candidate.memory.id)) return;
-        if (!canAddCandidate(candidate, selected, usedTokens, tokenBudget, maxPerCluster)) return;
-        selected.push(candidate);
-        selectedIds.add(candidate.memory.id);
-        usedTokens += candidate.tokenCost;
-        if (candidate.protectedReason) protectedCount += 1;
-    };
-
-    for (const candidate of ranked.filter(item => item.protectedReason)) {
-        if (protectedCount >= maxProtected) break;
-        tryAdd(candidate);
-    }
-    for (const candidate of ranked) {
-        if (candidate.protectedReason && protectedCount >= maxProtected) continue;
-        tryAdd(candidate);
-        if (selected.length >= maxSelected) break;
-    }
-    return selected;
+/** Select after ranking and retain deterministic per-candidate decisions for debug tooling. */
+export function selectRankedMemoryCandidatesWithTrace(
+    ranked: RankedMemoryCandidate[],
+    options: MemorySelectionOptions = {},
+): RankedMemorySelectionTrace {
+    return selectRankedMemoryCandidatesInternal(ranked, options);
 }
