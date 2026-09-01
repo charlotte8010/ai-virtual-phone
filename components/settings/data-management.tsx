@@ -62,6 +62,9 @@ import {
 import { clearStorageCategory, scanStorageSpace, type StorageCategoryId, type StorageCategoryStat } from "@/lib/storage-space";
 import { isAndroidBrowser, isIOSBrowser } from "@/lib/download-utils";
 import type { BackupManifest, DataModuleId, DataSnapshot, ImportResult, ModuleStats } from "@/lib/data-management/types";
+import { applyFloatMigrationPackage, dryRunFloatMigrationPackage, type NativeMigrationApplyResult } from "@/lib/migrations/native/importer";
+import { ProductionNativeMigrationStorage } from "@/lib/migrations/native/storage";
+import type { NativeMigrationDryRun } from "@/lib/migrations/native/types";
 
 type PendingImport = {
   file: File;
@@ -77,9 +80,20 @@ type PendingCloudRestore = {
   item: CloudBackupListItem;
 };
 
+type MigrationUiState =
+  | { status: "idle"; file: null }
+  | { status: "selected"; file: File }
+  | { status: "dry-running"; file: File }
+  | { status: "dry-run-success"; file: File; bytes: ArrayBuffer; dryRun: NativeMigrationDryRun; warnings: string[] }
+  | { status: "dry-run-failure"; file: File; errors: string[]; warnings: string[] }
+  | { status: "applying"; file: File; bytes: ArrayBuffer; dryRun: NativeMigrationDryRun; warnings: string[] }
+  | { status: "applied"; file: File; dryRun: NativeMigrationDryRun; result: NativeMigrationApplyResult; warnings: string[] }
+  | { status: "apply-failure"; file: File; dryRun: NativeMigrationDryRun; errors: string[]; warnings: string[] };
+
 type ConfirmRequest =
   | { type: "export"; moduleIds: DataModuleId[]; labels: string }
   | { type: "import"; moduleIds: DataModuleId[]; labels: string; overwrite: boolean }
+  | { type: "migration-apply" }
   | { type: "clear"; moduleIds: DataModuleId[]; labels: string }
   | { type: "media-maintenance" }
   | { type: "orphan-theme" };
@@ -89,6 +103,34 @@ type DataManagementProps = {
 };
 
 const ALL_MODULE_IDS = DATA_MODULES.map((module) => module.id);
+
+const MIGRATION_SUMMARY_FIELDS = [
+  ["characters", "characters"],
+  ["messages", "messages"],
+  ["assets", "assets"],
+  ["moments", "moments"],
+  ["comments", "comments"],
+  ["diary", "diary"],
+  ["worldbooks", "worldbooks"],
+  ["activeMemories", "activeMemories"],
+  ["archivedMemories", "archivedMemories"],
+  ["activeFutureIntents", "activeFutureIntents"],
+  ["archivedWindowsill", "archivedWindowsill"],
+  ["memoryLinks", "memoryLinks"],
+  ["legacyCoreSummaries", "legacyCoreSummaries"],
+  ["timelineRecords", "timelineRecords"],
+] as const satisfies ReadonlyArray<[keyof NativeMigrationDryRun["summary"], string]>;
+
+const MIGRATION_APPLY_FIELDS = [
+  ["plannedCreates", "plannedCreates"],
+  ["actualCreates", "actualCreates"],
+  ["reused", "reused"],
+  ["skipped", "skipped"],
+  ["conflicts", "conflicts"],
+  ["failed", "failed"],
+  ["warnings", "warnings"],
+  ["remainingCreatesAfterApply", "remainingCreatesAfterApply"],
+] as const satisfies ReadonlyArray<[keyof NativeMigrationApplyResult["expectedVsActual"], string]>;
 
 const MODULE_ICONS: Record<DataModuleId, LucideIcon> = {
   chat: MessageCircle,
@@ -308,6 +350,8 @@ export function DataManagement({ onNotice }: DataManagementProps) {
   const [spaceScanDetail, setSpaceScanDetail] = useState<string | null>(null);
   const [spaceClearPending, setSpaceClearPending] = useState<StorageCategoryStat | null>(null);
   const [spaceClearRange, setSpaceClearRange] = useState<number>(30);
+  const [migrationState, setMigrationState] = useState<MigrationUiState>({ status: "idle", file: null });
+  const migrationFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setCloudConfig(loadCloudBackupConfig());
@@ -520,6 +564,81 @@ export function DataManagement({ onNotice }: DataManagementProps) {
     setRestartNotice({ title: "导入完成，请彻底重启应用", summary: `${summary}${errorNote}。` });
   });
 
+  const handleMigrationFileSelected = (file: File | undefined) => {
+    if (!file || busy) return;
+    setMigrationState({ status: "selected", file });
+    if (migrationFileInputRef.current) migrationFileInputRef.current.value = "";
+  };
+
+  const handleMigrationDryRun = async () => {
+    const file = migrationState.file;
+    if (!file || busy || migrationState.status === "dry-running" || migrationState.status === "applying") {
+      if (!file) onNotice?.("请先选择 .float-migration.zip 文件。");
+      return;
+    }
+
+    setBusy("Sully Dry Run");
+    setMigrationState({ status: "dry-running", file });
+    try {
+      const bytes = await file.arrayBuffer();
+      const prepared = await dryRunFloatMigrationPackage(bytes, { storage: new ProductionNativeMigrationStorage() });
+      if (!prepared.ok) {
+        setMigrationState({ status: "dry-run-failure", file, errors: prepared.errors, warnings: prepared.warnings });
+        onNotice?.("Sully → Float Dry Run 未通过，不能 Apply。");
+        return;
+      }
+      const warnings = [...new Set([...prepared.pkg.warnings, ...prepared.dryRun.plan.warnings])];
+      setMigrationState({ status: "dry-run-success", file, bytes, dryRun: prepared.dryRun, warnings });
+      onNotice?.("Sully → Float Dry Run 已完成，请检查结果后再 Apply。");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Sully → Float Dry Run 失败。";
+      setMigrationState({ status: "dry-run-failure", file, errors: [message], warnings: [] });
+      onNotice?.(message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleMigrationApply = () => {
+    if (migrationState.status !== "dry-run-success") return;
+    setConfirmRequest({ type: "migration-apply" });
+  };
+
+  const executeMigrationApply = async () => {
+    if (migrationState.status !== "dry-run-success") return;
+    const state = migrationState;
+    setBusy("Sully 迁移 Apply");
+    setMigrationState({ status: "applying", file: state.file, bytes: state.bytes, dryRun: state.dryRun, warnings: state.warnings });
+    try {
+      const applied = await applyFloatMigrationPackage(state.bytes, { storage: new ProductionNativeMigrationStorage() });
+      if (!("expectedVsActual" in applied)) {
+        setMigrationState({
+          status: "apply-failure",
+          file: state.file,
+          dryRun: state.dryRun,
+          errors: applied.errors,
+          warnings: [...new Set([...state.warnings, ...applied.warnings])],
+        });
+        onNotice?.("Sully → Float Apply 未执行成功，不能继续 Apply。");
+        return;
+      }
+
+      const warnings = [...new Set([...state.warnings, ...applied.journal.warnings])];
+      setMigrationState({ status: "applied", file: state.file, dryRun: state.dryRun, result: applied, warnings });
+      await reloadStats().catch((error) => console.warn("[DataManagement] migration stats refresh failed:", error));
+      setRestartNotice({
+        title: applied.ok ? "迁移完成，请彻底重启应用" : "迁移已执行，请彻底重启应用并检查结果",
+        summary: `Sully → Float Apply：计划新增 ${applied.expectedVsActual.plannedCreates}，实际新增 ${applied.expectedVsActual.actualCreates}，复用 ${applied.expectedVsActual.reused}，跳过 ${applied.expectedVsActual.skipped}，冲突 ${applied.expectedVsActual.conflicts}，失败 ${applied.expectedVsActual.failed}。`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Sully → Float Apply 失败。";
+      setMigrationState({ status: "apply-failure", file: state.file, dryRun: state.dryRun, errors: [message], warnings: state.warnings });
+      onNotice?.(message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const handlePersist = () => runAction("申请保护", async () => {
     if (!navigator.storage?.persist) return "当前浏览器不支持持久化存储申请。";
     const ok = await navigator.storage.persist();
@@ -596,6 +715,10 @@ export function DataManagement({ onNotice }: DataManagementProps) {
     }
     if (request.type === "import") {
       void executeImport(request.moduleIds, request.overwrite);
+      return;
+    }
+    if (request.type === "migration-apply") {
+      void executeMigrationApply();
       return;
     }
     if (request.type === "media-maintenance") {
@@ -791,6 +914,124 @@ export function DataManagement({ onNotice }: DataManagementProps) {
             className="hidden"
             onChange={(event) => void handleFileSelected(event.target.files?.[0])}
           />
+        </div>
+      </div>
+
+      <div className="data-section">
+        <DataSectionTitle>Sully → Float 迁移</DataSectionTitle>
+        <div className="menu-group">
+          <div className="menu-item data-readonly-item">
+            <DataSettingsIcon icon={Upload} color={BINDING_ACCENTS.api} />
+            <div className="menu-label-group">
+              <span className="menu-label">选择 .float-migration.zip</span>
+              <span className="menu-desc">
+                {migrationState.file
+                  ? `已选择：${migrationState.file.name}`
+                  : "迁移包会先经过 Dry Run；不会复用普通 Float 备份导入。"}
+              </span>
+            </div>
+          </div>
+          <div className="data-menu-actions">
+            <button
+              type="button"
+              className="ui-btn ui-btn-outline"
+              onClick={() => migrationFileInputRef.current?.click()}
+              disabled={Boolean(busy) || migrationState.status === "applying"}
+            >
+              <Upload size={16} /> 选择迁移包
+            </button>
+            <button
+              type="button"
+              className={`ui-btn ui-btn-primary ${migrationState.status === "dry-running" ? "is-busy" : ""}`}
+              onClick={() => void handleMigrationDryRun()}
+              disabled={!migrationState.file || Boolean(busy) || migrationState.status === "dry-running" || migrationState.status === "applying"}
+            >
+              {migrationState.status === "dry-running"
+                ? <><Loader2 size={16} className="animate-spin" /> Dry Run 中…</>
+                : <><ShieldCheck size={16} /> Dry Run</>}
+            </button>
+          </div>
+          <input
+            ref={migrationFileInputRef}
+            type="file"
+            accept=".float-migration.zip,.zip,application/zip"
+            className="hidden"
+            onChange={(event) => void handleMigrationFileSelected(event.target.files?.[0])}
+          />
+          <p className="menu-desc" role="note" style={{ margin: "0 16px 12px" }}>
+            Dry Run 仅检查，不会写入 Float。
+          </p>
+
+          {(migrationState.status === "dry-run-success" || migrationState.status === "applying" || migrationState.status === "applied" || migrationState.status === "apply-failure") && (
+            <div className="data-import-preview" data-ui="migration-dry-run-result">
+              <div className="menu-label-group" style={{ marginBottom: 12 }}>
+                <span className="menu-label">Dry Run 结果</span>
+                <span className="menu-desc">{migrationState.status === "applying" ? "Apply 执行中…" : migrationState.status === "applied" ? "已完成 Apply。" : "检查完成，Apply 仍需单独确认。"}</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8 }}>
+                {MIGRATION_SUMMARY_FIELDS.map(([key, label]) => (
+                  <div key={key} className="data-metric" style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                    <span>{label}</span>
+                    <strong>{migrationState.dryRun.summary[key]}</strong>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8, marginTop: 12 }}>
+                <span>create: {migrationState.dryRun.reconciliation.totals.create}</span>
+                <span>reuse: {migrationState.dryRun.reconciliation.totals.reuse}</span>
+                <span>skip: {migrationState.dryRun.reconciliation.totals.skip}</span>
+                <span>conflicts: {migrationState.dryRun.reconciliation.totals.conflicts}</span>
+              </div>
+              {migrationState.warnings.length > 0 && (
+                <div className="data-cloud-result" role="status" style={{ marginTop: 12 }}>
+                  <strong>warnings</strong>
+                  <ul style={{ margin: "6px 0 0 18px" }}>
+                    {migrationState.warnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}
+                  </ul>
+                </div>
+              )}
+              {migrationState.status === "dry-run-success" && (
+                <div className="data-menu-actions" style={{ marginTop: 12 }}>
+                  <button type="button" className="ui-btn ui-btn-danger" onClick={handleMigrationApply} disabled={Boolean(busy)}>
+                    <Upload size={16} /> Apply
+                  </button>
+                </div>
+              )}
+              {migrationState.status === "applied" && (
+                <div className="data-import-preview" data-ui="migration-apply-result" style={{ marginTop: 12 }}>
+                  <div className="menu-desc" style={{ marginBottom: 8 }}>Apply 结果 · journal runId: {migrationState.result.journal.runId}</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8 }}>
+                    {MIGRATION_APPLY_FIELDS.map(([key, label]) => (
+                      <div key={key} className="data-metric" style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                        <span>{label}</span>
+                        <strong>{migrationState.result.expectedVsActual[key]}</strong>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {migrationState.status === "apply-failure" && (
+                <div className="data-cloud-result is-err" role="alert" style={{ marginTop: 12 }}>
+                  <strong>Apply failed</strong>
+                  <ul style={{ margin: "6px 0 0 18px" }}>
+                    {migrationState.errors.map((error, index) => <li key={`${error}-${index}`}>{error}</li>)}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {migrationState.status === "dry-run-failure" && (
+            <div className="data-cloud-result is-err" data-ui="migration-dry-run-error" role="alert">
+              <strong>Dry Run 未通过，Apply 已禁用。</strong>
+              {migrationState.errors.length > 0 && (
+                <ul style={{ margin: "6px 0 0 18px" }}>
+                  {migrationState.errors.map((error, index) => <li key={`${error}-${index}`}>{error}</li>)}
+                </ul>
+              )}
+              {migrationState.warnings.length > 0 && <p style={{ marginTop: 8 }}>warnings: {migrationState.warnings.join("；")}</p>}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1117,7 +1358,9 @@ export function DataManagement({ onNotice }: DataManagementProps) {
               ? "确认导出备份？"
               : confirmRequest.type === "import"
                 ? confirmRequest.overwrite ? "确认覆盖导入？" : "确认合并导入？"
-                : confirmRequest.type === "media-maintenance"
+                : confirmRequest.type === "migration-apply"
+                  ? "确认 Apply Sully → Float 迁移？"
+                  : confirmRequest.type === "media-maintenance"
                   ? "确认立即清理媒体？"
                   : confirmRequest.type === "orphan-theme"
                     ? "确认清理未引用主题素材？"
@@ -1130,20 +1373,24 @@ export function DataManagement({ onNotice }: DataManagementProps) {
                 ? confirmRequest.overwrite
                   ? `覆盖导入会用备份中的数据覆盖已选模块：${confirmRequest.labels}。建议先导出当前数据。是否继续？`
                   : `将合并导入以下模块：${confirmRequest.labels}。列表型数据会按 ID 去重合并，同 ID 项以备份为准。是否继续？`
-                : confirmRequest.type === "media-maintenance"
+                : confirmRequest.type === "migration-apply"
+                  ? "当前文件已经通过 Dry Run。只有确认后才会写入 Float；Apply 不会重新选择或修改迁移包。是否继续？"
+                  : confirmRequest.type === "media-maintenance"
                   ? "将按规则压缩/清理过期动态媒体：4 天以上压缩图片，7 天以上清理聊天图片、朋友圈/小红书真实图和本地音乐，并清理确定无引用的旧主题素材。壁纸、图标、dock、字体等仍在引用的常驻资源不会删除。是否继续？"
                   : confirmRequest.type === "orphan-theme"
                     ? "将扫描当前仍被引用的主题素材，只删除确定无引用的旧图片、旧字体、旧 dock、旧图标皮肤等素材。是否继续？"
                     : `清理 ${confirmRequest.labels} 会删除对应数据。建议先备份。是否继续？`
           }
-          icon={confirmRequest.type === "export" ? Download : confirmRequest.type === "import" ? Upload : confirmRequest.type === "media-maintenance" ? Archive : AlertTriangle}
-          variant={confirmRequest.type === "clear" || confirmRequest.type === "media-maintenance" || confirmRequest.type === "orphan-theme" || (confirmRequest.type === "import" && confirmRequest.overwrite) ? "danger" : "action"}
+          icon={confirmRequest.type === "export" ? Download : confirmRequest.type === "import" ? Upload : confirmRequest.type === "migration-apply" ? Upload : confirmRequest.type === "media-maintenance" ? Archive : AlertTriangle}
+          variant={confirmRequest.type === "clear" || confirmRequest.type === "migration-apply" || confirmRequest.type === "media-maintenance" || confirmRequest.type === "orphan-theme" || (confirmRequest.type === "import" && confirmRequest.overwrite) ? "danger" : "action"}
           confirmLabel={
             confirmRequest.type === "export"
               ? "确认导出"
               : confirmRequest.type === "import"
                 ? confirmRequest.overwrite ? "确认覆盖" : "确认导入"
-                : confirmRequest.type === "media-maintenance"
+                : confirmRequest.type === "migration-apply"
+                  ? "确认 Apply"
+                  : confirmRequest.type === "media-maintenance"
                   ? "立即执行"
                   : "确认清理"
           }
