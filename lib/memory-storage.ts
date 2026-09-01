@@ -19,6 +19,11 @@ const LINK_STORE_NAME = "memory_links";
 
 const CONFIG_KEY = "ai_phone_memory_config_v1";
 
+export interface MemoryPersistenceOptions {
+    /** Skip all post-save Cognitive Memory link work for imports/restores. */
+    suppressMemoryLinkLifecycle?: boolean;
+}
+
 function hasBrowserApi(): boolean {
     return typeof window !== "undefined" && typeof indexedDB !== "undefined";
 }
@@ -80,19 +85,42 @@ function runRequest<T>(req: IDBRequest<T>): Promise<T> {
     });
 }
 
-function scheduleMemoryLinkGeneration(entry: MemoryEntry): void {
-    if (entry.type !== "long_term") return;
+function scheduleMemoryLinkLifecycle(
+    entries: readonly MemoryEntry[],
+    options: MemoryPersistenceOptions = {},
+): void {
+    if (options.suppressMemoryLinkLifecycle) return;
+    const longTermEntries = entries.filter(entry => entry.type === "long_term");
+    if (longTermEntries.length === 0) return;
+
     void import("./memory-links")
         .then(({ scheduleMemoryLinkBackfillForCharacter, scheduleMemoryLinkGenerationForEntry }) => {
-            scheduleMemoryLinkGenerationForEntry(entry);
-            scheduleMemoryLinkBackfillForCharacter(entry.characterId);
+            for (const entry of longTermEntries) {
+                try {
+                    scheduleMemoryLinkGenerationForEntry(entry);
+                } catch (error) {
+                    console.warn("[MemoryLinks] Post-save generation scheduling failed:", error);
+                }
+            }
+
+            const characterIds = new Set(longTermEntries.map(entry => entry.characterId));
+            for (const characterId of characterIds) {
+                try {
+                    scheduleMemoryLinkBackfillForCharacter(characterId);
+                } catch (error) {
+                    console.warn("[MemoryLinks] Post-save backfill scheduling failed:", error);
+                }
+            }
         })
         .catch(error => console.warn("[MemoryLinks] Post-save generation unavailable:", error));
 }
 
 // ── Long-term Entry CRUD ──
 
-export async function saveMemoryEntry(entry: MemoryEntry): Promise<void> {
+export async function saveMemoryEntry(
+    entry: MemoryEntry,
+    options: MemoryPersistenceOptions = {},
+): Promise<void> {
     const db = await openDb();
     if (!db) return;
     try {
@@ -105,7 +133,7 @@ export async function saveMemoryEntry(entry: MemoryEntry): Promise<void> {
     } finally {
         db.close();
     }
-    scheduleMemoryLinkGeneration(entry);
+    scheduleMemoryLinkLifecycle([entry], options);
 }
 
 export async function loadMemoryEntries(characterId: string): Promise<MemoryEntry[]> {
@@ -232,7 +260,10 @@ export async function deleteMemoryLinksForMemoryIds(memoryIds: readonly string[]
 }
 
 /** Persist lifecycle changes, including old/new replacement pairs, atomically. */
-export async function saveMemoryEntries(entries: MemoryEntry[]): Promise<void> {
+export async function saveMemoryEntries(
+    entries: MemoryEntry[],
+    options: MemoryPersistenceOptions = {},
+): Promise<void> {
     if (entries.length === 0) return;
     const db = await openDb();
     if (!db) {
@@ -251,6 +282,7 @@ export async function saveMemoryEntries(entries: MemoryEntry[]): Promise<void> {
     } finally {
         db.close();
     }
+    scheduleMemoryLinkLifecycle(entries, options);
 }
 
 /** Update selected long-term memories atomically after they were injected into a prompt. */

@@ -113,6 +113,7 @@ async function loadModule(modulePath) {
         context,
         identifier: normalizedPath,
         importModuleDynamically: async (specifier, referencingModule) => {
+            context.__lifecycle.dynamicImports += 1;
             const dependency = await loadModule(sourceModulePath(specifier, referencingModule));
             if (dependency.status !== "evaluated") await dependency.evaluate();
             return dependency;
@@ -157,6 +158,7 @@ const normalSingle = memory("normal-single");
 await saveMemoryEntry(normalSingle);
 await Promise.resolve();
 await Promise.resolve();
+await new Promise(resolvePromise => setTimeout(resolvePromise, 0));
 assert.deepEqual(context.__memoryRecords.get(normalSingle.id), normalSingle);
 assert.equal(context.__lifecycle.dynamicImports, 1);
 assert.deepEqual(context.__lifecycle.generation, [normalSingle.id]);
@@ -170,6 +172,7 @@ const normalBatch = [
 await saveMemoryEntries(normalBatch);
 await Promise.resolve();
 await Promise.resolve();
+await new Promise(resolvePromise => setTimeout(resolvePromise, 0));
 assert.deepEqual(
     normalBatch.map(entry => context.__memoryRecords.get(entry.id)),
     normalBatch,

@@ -179,6 +179,23 @@ assert.ok(["created", "unchanged", "skipped"].includes(generatedAgain.status));
 assert.deepEqual(Array.from(context.__testLinks, link => link.id).sort(), linkIdsAfterFirstGeneration);
 assert.ok(MAX_LINK_GENERATION_CANDIDATES <= 16, "generation candidate pool must have a hard bound");
 
+const terminalIntent = memory("terminal-intent", {
+    kind: "future_intent",
+    content: "已经完成的计划",
+    futureIntent: {
+        type: "plan",
+        status: "fulfilled",
+        timePrecision: "day",
+        targetAt: "2026-08-20T12:00:00.000Z",
+    },
+});
+context.__testLinks = [];
+const terminalGeneration = await maybeGenerateMemoryLinksForEntry(terminalIntent, {
+    candidateEntries: [seed, related],
+});
+assert.equal(terminalGeneration.status, "skipped", "terminal Future Intent must not become an active link source");
+assert.deepEqual(context.__testLinks, [], "terminal Future Intent must not form new active links");
+
 context.__linkWriteFailure = true;
 await assert.doesNotReject(
     maybeGenerateMemoryLinksForEntry(seed, { candidateEntries: [related] }),
