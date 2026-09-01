@@ -97,11 +97,21 @@ try {
   assert.equal(terminalPlan.memoryLinks.some((link) => link.fromMemoryId === terminalPlan.idMap.memories["memory-b"] && link.toMemoryId === terminalPlan.idMap.memories["memory-c"]), false);
 
   const terminalBytes = await writeFloatMigrationPackage({
-    manifest: { ...manifest, counts: { ...manifest.counts, memoryLinks: terminalPayload.memoryLinks.length } },
+    manifest: { ...manifest, counts: { ...manifest.counts, futureIntents: terminalPayload.futureIntents.length, memoryLinks: terminalPayload.memoryLinks.length } },
     payload: terminalPayload,
     binaryAssets: [],
   });
-  const terminalRun = await dryRunFloatMigrationPackage(terminalBytes, { storage: { kind: "isolated-browser", async readSnapshot() { throw new Error("snapshot should not be read"); } } });
+  const terminalRun = await dryRunFloatMigrationPackage(terminalBytes, {
+    storage: {
+      kind: "isolated-browser",
+      async readSnapshot() {
+        return {
+          identities: [], characters: [], contacts: [], sessions: [], messages: [], storySessions: [], storyMessages: [], mediaIds: [],
+          moments: [], momentComments: [], diaries: [], worlds: [], worldbooks: [], calendar: [], memories: [], memoryLinks: [],
+        };
+      },
+    },
+  });
   assert.equal(terminalRun.ok, true, terminalRun.ok ? "" : terminalRun.errors.join("\n"));
 
   const brokenPayload = structuredClone(payload);
@@ -156,6 +166,16 @@ try {
   assert.equal(reconciliation.memoryLinks.conflicts.length, 1);
   assert.equal(reconciliation.resolvedIdMap.memoryLinks["link-emotion"], "existing-semantic");
   assert.equal(Object.hasOwn(reconciliation.resolvedIdMap.memoryLinks, "link-temporal"), false);
+
+  const secondReconciliation = reconcileNativeMigrationPlan(plan, {
+    ...emptySnapshot,
+    memoryLinks: [...existingMemoryLinks, ...reconciliation.memoryLinks.create],
+    idMap: reconciliation.resolvedIdMap,
+  });
+  assert.equal(secondReconciliation.memoryLinks.create.length, 0);
+  assert.equal(secondReconciliation.memoryLinks.conflicts.length, 1);
+  assert.equal(secondReconciliation.idMap, "reuse");
+  assert.equal(Object.hasOwn(secondReconciliation.resolvedIdMap.memoryLinks, "link-temporal"), false);
 
   assert.match(storageSource, /saveMemoryEntries\([\s\S]*suppressMemoryLinkLifecycle:\s*true/);
   assert.match(storageSource, /saveMemoryLinks/);
