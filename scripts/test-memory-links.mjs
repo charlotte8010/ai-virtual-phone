@@ -147,6 +147,22 @@ assert.equal(normalizeMemoryLink({
     strength: 0.5,
 }), null);
 assert.equal(normalizeMemoryLink({
+    id: "infinite-strength",
+    characterId: "char-1",
+    fromMemoryId: "a",
+    toMemoryId: "b",
+    type: "topic",
+    strength: Infinity,
+}), null);
+assert.equal(normalizeMemoryLink({
+    id: "negative-strength",
+    characterId: "char-1",
+    fromMemoryId: "a",
+    toMemoryId: "b",
+    type: "topic",
+    strength: -0.1,
+}), null);
+assert.equal(normalizeMemoryLink({
     id: "malformed-strength",
     characterId: "char-1",
     fromMemoryId: "a",
@@ -178,13 +194,15 @@ const graphMemories = [
 context.__testMemories = graphMemories;
 context.__testLinks = [
     link("seed-a", "seed", "neighbor-a", 0.9),
-    link("seed-b", "seed", "neighbor-b", 0.8),
+    link("seed-b", "seed", "neighbor-b", 0.6),
     link("seed-c", "seed", "neighbor-c", 0.1),
     link("a-c", "neighbor-a", "neighbor-c", 0.8),
+    link("b-c", "neighbor-b", "neighbor-c", 0.9),
     link("cycle", "neighbor-a", "seed", 0.95),
     link("terminal", "seed", "terminal-intent", 0.95),
     link("orphan", "seed", "missing", 0.95),
     link("cross-character", "seed", "other-character", 0.95, { characterId: "char-2" }),
+    link("foreign-target", "seed", "foreign-memory", 0.95),
     link("duplicate-low", "seed", "neighbor-b", 0.4),
     link("duplicate-high", "seed", "neighbor-b", 0.75),
 ];
@@ -194,7 +212,9 @@ assert.deepEqual(Array.from(expansion.candidates, candidate => candidate.memoryI
     "neighbor-a", "neighbor-b", "neighbor-c",
 ]);
 assert.equal(expansion.candidates.find(candidate => candidate.memoryId === "neighbor-b").linkActivationScore, 0.75);
-assert.ok(expansion.candidates.find(candidate => candidate.memoryId === "neighbor-c").linkActivationScore < 0.75);
+const multiPathCandidate = expansion.candidates.find(candidate => candidate.memoryId === "neighbor-c");
+assert.ok(multiPathCandidate.linkActivationScore < 0.75);
+assert.deepEqual(Array.from(multiPathCandidate.linkActivationPath.linkIds), ["seed-a", "a-c"]);
 assert.equal(expansion.candidates.some(candidate => candidate.memoryId === "seed"), false, "cycles must not revisit a seed");
 assert.equal(expansion.candidates.some(candidate => candidate.memoryId === "terminal-intent"), false, "terminal Future Intent must stay inactive");
 assert.equal(expansion.limits.maxSeeds, MAX_LINK_SEEDS);
@@ -256,6 +276,12 @@ const config = {
     maxSelectedLongTermMemories: 3,
     maxProtectedFutureIntents: 2,
 };
+const memoryStatsBeforeLinks = serviceMemories.map(entry => ({
+    id: entry.id,
+    accessCount: entry.accessCount,
+    lastAccessedAt: entry.lastAccessedAt,
+    stability: entry.stability,
+}));
 context.__testConfig = config;
 const linkedSelection = await selectMemoriesForPrompt("char-1", "alpha", {
     config,
@@ -266,6 +292,8 @@ const linkedSelection = await selectMemoriesForPrompt("char-1", "alpha", {
 });
 assert.ok(linkedSelection.selected.some(entry => entry.id === "neighbor-a"));
 assert.ok(linkedSelection.selected.some(entry => entry.id === "protected-fi"));
+assert.ok(linkedSelection.selected.length <= 3, "link expansion must remain bounded by maxSelected");
+assert.ok(linkedSelection.debug.usedTokens <= 1000, "link expansion must remain bounded by token budget");
 assert.ok(linkedSelection.debug.channelCounts.link > 0);
 const linkDebug = linkedSelection.debug.candidates.find(candidate => candidate.memoryId === "neighbor-a");
 assert.ok(linkDebug.sources.includes("link"));
@@ -277,6 +305,16 @@ const protectedDebug = linkedSelection.debug.candidates.find(candidate => candid
 assert.equal(protectedDebug.protectedReason, "due_today");
 assert.equal(protectedDebug.selected, true);
 assert.ok(linkedSelection.debug.linkExpansion.expandedMemoryIds.includes("neighbor-a"));
+assert.deepEqual(
+    serviceMemories.map(entry => ({
+        id: entry.id,
+        accessCount: entry.accessCount,
+        lastAccessedAt: entry.lastAccessedAt,
+        stability: entry.stability,
+    })),
+    memoryStatsBeforeLinks,
+    "link retrieval must not mutate recall stats",
+);
 
 const baselineSelection = await selectMemoriesForPrompt("char-1", "alpha", {
     config: { ...config, memoryLinksEnabled: false },
@@ -293,11 +331,11 @@ const selectionOptions = {
 assert.equal(baselineSelection.debug.channelCounts.link, 0);
 assert.equal(baselineSelection.selected.some(entry => entry.id === "neighbor-a"), false);
 assert.deepEqual(
-    Array.from(await selectMemoriesForPrompt("char-1", "alpha", {
+    Array.from((await selectMemoriesForPrompt("char-1", "alpha", {
         ...selectionOptions,
         config,
         debug: false,
-    }), entry => entry.id),
+    })).selected, entry => entry.id),
     Array.from(linkedSelection.selected, entry => entry.id),
     "debug on/off must preserve C9 selected IDs",
 );

@@ -1,6 +1,6 @@
 // High-level memory orchestration: candidate generation, ranking, and prompt selection.
 
-import type { MemoryConfig, MemoryEntry } from "./memory-types";
+import type { MemoryConfig, MemoryEntry, MemoryLinkActivationPath } from "./memory-types";
 import { loadMemoryConfig, loadMemoryEntriesByType, updateMemoryRecallStats } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { generateEmbedding, resolveEmbeddingModel, cosineSimilarity } from "./memory-embedding";
@@ -20,10 +20,46 @@ import {
     type RankedMemoryCandidate,
 } from "./memory-ranking";
 import { getRecallMemoryIds, type RecallWriteGuard } from "./memory-recall-stats";
+import { MAX_LINK_SEEDS, spreadMemoryActivation, type MemoryLinkExpansion } from "./memory-links";
 
 const VECTOR_TOP_K = 20;
 const KEYWORD_TOP_K = 20;
 const RECENT_TOP_K = 10;
+
+function normalizeLinkActivation(value: number | undefined): number {
+    return Number.isFinite(value ?? Number.NaN)
+        ? Math.min(1, Math.max(0, value ?? 0))
+        : 0;
+}
+
+function linkPathKey(path: MemoryLinkActivationPath | undefined): string {
+    if (!path) return "";
+    return [
+        path.seedMemoryIds.join(","),
+        path.memoryIds.join(">"),
+        path.linkIds.join(">"),
+    ].join("|");
+}
+
+function chooseLinkPath(
+    left: MemoryLinkActivationPath | undefined,
+    right: MemoryLinkActivationPath | undefined,
+): MemoryLinkActivationPath | undefined {
+    if (!left) return right;
+    if (!right) return left;
+    if (right.activation !== left.activation) return right.activation > left.activation ? right : left;
+    if (right.depth !== left.depth) return right.depth < left.depth ? right : left;
+    return linkPathKey(right) < linkPathKey(left) ? right : left;
+}
+
+function cloneLinkActivationPath(path: MemoryLinkActivationPath): MemoryLinkActivationPath {
+    return {
+        ...path,
+        seedMemoryIds: [...path.seedMemoryIds],
+        memoryIds: [...path.memoryIds],
+        linkIds: [...path.linkIds],
+    };
+}
 
 export interface MemorySelectionOptions extends MemoryRankingOptions, RankingSelectionOptions {
     config?: MemoryConfig;
@@ -56,6 +92,14 @@ export interface MemoryRetrievalDebugCandidate {
     selected: boolean;
     selectionReason?: MemorySelectionDecisionReason;
     rejectionReason?: MemorySelectionDecisionReason;
+    linkActivation?: MemoryLinkActivationPath;
+}
+
+export interface MemoryRetrievalLinkExpansion {
+    enabled: boolean;
+    seedMemoryIds: string[];
+    expandedMemoryIds: string[];
+    limits: MemoryLinkExpansion["limits"];
 }
 
 export interface MemoryRetrievalDebug {
@@ -76,6 +120,7 @@ export interface MemoryRetrievalDebug {
     selectedMemoryIds: string[];
     /** Populated by a collector after the prompt assembler confirms injection. */
     injectedMemoryIds: string[];
+    linkExpansion?: MemoryRetrievalLinkExpansion;
 }
 
 export interface MemorySelectionResult {
@@ -151,7 +196,7 @@ export async function selectMemoriesForPrompt(
             selectedCount: selected.length,
             protectedIds: [],
             usedTokens: selected.reduce((total, entry) => total + estimateTokens(entry.content) + 4, 0),
-            channelCounts: { vector: 0, keyword: 0, future_intent: 0, recent: 0 },
+            channelCounts: { vector: 0, keyword: 0, future_intent: 0, recent: 0, link: 0 },
             debugEnabled,
             debugCollector: options.debugCollector,
         });
@@ -176,7 +221,7 @@ export async function selectMemoriesForPrompt(
             selectedCount: 0,
             protectedIds: [],
             usedTokens: 0,
-            channelCounts: { vector: 0, keyword: 0, future_intent: 0, recent: 0 },
+            channelCounts: { vector: 0, keyword: 0, future_intent: 0, recent: 0, link: 0 },
             debugEnabled,
             debugCollector: options.debugCollector,
         });
@@ -193,6 +238,7 @@ export async function selectMemoriesForPrompt(
         keyword: 0,
         future_intent: 0,
         recent: 0,
+        link: 0,
     };
     const addCandidate = (candidate: MemoryCandidate): void => {
         const previous = candidatesById.get(candidate.memory.id);
@@ -215,6 +261,11 @@ export async function selectMemoriesForPrompt(
             keywordScore: Math.max(previous.keywordScore ?? 0, candidate.keywordScore ?? 0),
             tagScore: Math.max(previous.tagScore ?? 0, candidate.tagScore ?? 0),
             temporalScore: Math.max(previous.temporalScore ?? 0, candidate.temporalScore ?? 0),
+            linkActivationScore: Math.max(
+                normalizeLinkActivation(previous.linkActivationScore),
+                normalizeLinkActivation(candidate.linkActivationScore),
+            ),
+            linkActivationPath: chooseLinkPath(previous.linkActivationPath, candidate.linkActivationPath),
         });
     };
 
@@ -287,7 +338,35 @@ export async function selectMemoriesForPrompt(
         now: options.now ?? new Date(),
         timezone: options.timezone,
     };
-    const ranked = rankMemoryCandidates([...candidatesById.values()], currentContext, rankingOptions);
+    let ranked = rankMemoryCandidates([...candidatesById.values()], currentContext, rankingOptions);
+    let linkExpansion: MemoryRetrievalLinkExpansion | undefined;
+    if (config.memoryLinksEnabled !== false) {
+        const expansion = await spreadMemoryActivation(
+            characterId,
+            ranked.slice(0, MAX_LINK_SEEDS).map(candidate => candidate.memory.id),
+            memories,
+        );
+        for (const candidate of expansion.candidates) {
+            const memory = memories.find(entry => entry.id === candidate.memoryId);
+            if (!memory) continue;
+            channelCounts.link += 1;
+            addCandidate({
+                memory,
+                source: "link",
+                linkActivationScore: candidate.linkActivationScore,
+                linkActivationPath: candidate.linkActivationPath,
+            });
+        }
+        ranked = rankMemoryCandidates([...candidatesById.values()], currentContext, rankingOptions);
+        linkExpansion = {
+            enabled: true,
+            seedMemoryIds: [...expansion.seedMemoryIds],
+            expandedMemoryIds: expansion.candidates
+                .filter(candidate => memories.some(entry => entry.id === candidate.memoryId))
+                .map(candidate => candidate.memoryId),
+            limits: { ...expansion.limits },
+        };
+    }
     const selectionOptions: RankingSelectionOptions = {
         tokenBudget: options.tokenBudget ?? options.longTermTokenBudget ?? config.longTermTokenBudget,
         maxSelected: options.maxSelected ?? (
@@ -319,6 +398,7 @@ export async function selectMemoriesForPrompt(
         protectedIds: selectedRanked.filter(item => item.protectedReason).map(item => item.memory.id),
         usedTokens: selectedRanked.reduce((total, item) => total + item.tokenCost, 0),
         channelCounts,
+        linkExpansion,
         debugEnabled,
         debugCollector: options.debugCollector,
     });
@@ -399,6 +479,7 @@ type DebugResultInput = {
     protectedIds: string[];
     usedTokens: number;
     channelCounts: Record<MemoryCandidateSource, number>;
+    linkExpansion?: MemoryRetrievalLinkExpansion;
     debugEnabled: boolean;
     debugCollector?: MemoryRetrievalDebugCollector;
 };
@@ -419,6 +500,14 @@ function buildDebugResult(input: DebugResultInput): MemoryRetrievalDebug {
         limits: { ...input.limits },
         selectedMemoryIds: [...input.selectedIds],
         injectedMemoryIds: [],
+        ...(input.linkExpansion ? {
+            linkExpansion: {
+                enabled: input.linkExpansion.enabled,
+                seedMemoryIds: [...input.linkExpansion.seedMemoryIds],
+                expandedMemoryIds: [...input.linkExpansion.expandedMemoryIds],
+                limits: { ...input.linkExpansion.limits },
+            },
+        } : {}),
     };
     if (input.debugEnabled) {
         const decisions = new Map(
@@ -439,6 +528,9 @@ function buildDebugResult(input: DebugResultInput): MemoryRetrievalDebug {
                 ...(selected
                     ? { selectionReason: decision?.reason ?? "ranked" }
                     : { rejectionReason: decision?.reason ?? "lower_rank" }),
+                ...(candidate.linkActivationPath ? {
+                    linkActivation: cloneLinkActivationPath(candidate.linkActivationPath),
+                } : {}),
             };
         });
     }
@@ -483,7 +575,18 @@ function cloneRetrievalDebug(debug: MemoryRetrievalDebug): MemoryRetrievalDebug 
             ...candidate,
             sources: [...candidate.sources],
             featureScores: { ...candidate.featureScores },
+            ...(candidate.linkActivation ? {
+                linkActivation: cloneLinkActivationPath(candidate.linkActivation),
+            } : {}),
         })),
+        ...(debug.linkExpansion ? {
+            linkExpansion: {
+                ...debug.linkExpansion,
+                seedMemoryIds: [...debug.linkExpansion.seedMemoryIds],
+                expandedMemoryIds: [...debug.linkExpansion.expandedMemoryIds],
+                limits: { ...debug.linkExpansion.limits },
+            },
+        } : {}),
     };
 }
 

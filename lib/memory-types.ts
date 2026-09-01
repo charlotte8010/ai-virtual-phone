@@ -44,6 +44,34 @@ export type TimePrecision =
     | "vague"
     | "unknown";
 
+export type MemoryLinkType =
+    | "temporal"
+    | "emotion"
+    | "person"
+    | "topic"
+    | "causal"
+    | "metaphor";
+
+export interface MemoryLink {
+    id: string;
+    characterId: string;
+    fromMemoryId: string;
+    toMemoryId: string;
+    type: MemoryLinkType;
+    strength: number;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface MemoryLinkActivationPath {
+    seedMemoryIds: string[];
+    seedMemoryId?: string;
+    depth: number;
+    activation: number;
+    memoryIds: string[];
+    linkIds: string[];
+}
+
 export interface FutureIntentMeta {
     type: FutureIntentType;
     status: FutureIntentStatus;
@@ -226,6 +254,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
     atomicMemoryExtractionEnabled: true,
     futureIntentEnabled: true,
     hybridRecallEnabled: true,
+    memoryLinksEnabled: true,
     maxSelectedLongTermMemories: 10,
     maxProtectedFutureIntents: 3,
     shortTermAllowedSources: {

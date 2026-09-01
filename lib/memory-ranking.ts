@@ -1,9 +1,9 @@
 // Cognitive Retrieval v1: normalized feature scoring, protected intents,
 // diversity control, and hard token-budget selection.
 
-import type { MemoryEntry } from "./memory-types";
+import type { MemoryEntry, MemoryLinkActivationPath } from "./memory-types";
 
-export type MemoryCandidateSource = "vector" | "keyword" | "future_intent" | "recent";
+export type MemoryCandidateSource = "vector" | "keyword" | "future_intent" | "recent" | "link";
 
 export interface MemoryCandidate {
     memory: MemoryEntry;
@@ -13,6 +13,8 @@ export interface MemoryCandidate {
     keywordScore?: number;
     tagScore?: number;
     temporalScore?: number;
+    linkActivationScore?: number;
+    linkActivationPath?: MemoryLinkActivationPath;
 }
 
 export interface MemoryFeatures {
@@ -25,6 +27,7 @@ export interface MemoryFeatures {
     stability: number;
     mood: number;
     temporal: number;
+    linkActivation: number;
 }
 
 export type ProtectedMemoryReason = "due_today" | "due_tomorrow" | "critical_overdue";
@@ -34,6 +37,8 @@ export interface RankedMemoryCandidate {
     score: number;
     features: MemoryFeatures;
     sources: MemoryCandidateSource[];
+    linkActivationScore?: number;
+    linkActivationPath?: MemoryLinkActivationPath;
     protectedReason?: ProtectedMemoryReason;
     clusterKey?: string;
     tokenCost: number;
@@ -89,6 +94,7 @@ const RANK_WEIGHTS: MemoryFeatures = {
     stability: 0.05,
     mood: 0.03,
     temporal: 0.07,
+    linkActivation: 0.08,
 };
 
 function clamp(value: number, min = 0, max = 1): number {
@@ -224,6 +230,30 @@ function getCandidateSources(candidate: MemoryCandidate): MemoryCandidateSource[
     ])];
 }
 
+function normalizeLinkActivation(value: number | undefined): number {
+    return Number.isFinite(value) ? clamp(value ?? 0) : 0;
+}
+
+function linkPathKey(path: MemoryLinkActivationPath | undefined): string {
+    if (!path) return "";
+    return [
+        path.seedMemoryIds.join(","),
+        path.memoryIds.join(">"),
+        path.linkIds.join(">"),
+    ].join("|");
+}
+
+function chooseLinkPath(
+    left: MemoryLinkActivationPath | undefined,
+    right: MemoryLinkActivationPath | undefined,
+): MemoryLinkActivationPath | undefined {
+    if (!left) return right;
+    if (!right) return left;
+    if (right.activation !== left.activation) return right.activation > left.activation ? right : left;
+    if (right.depth !== left.depth) return right.depth < left.depth ? right : left;
+    return linkPathKey(right) < linkPathKey(left) ? right : left;
+}
+
 function mergeCandidates(candidates: MemoryCandidate[]): MemoryCandidate[] {
     const merged = new Map<string, MemoryCandidate>();
     for (const candidate of candidates) {
@@ -244,6 +274,11 @@ function mergeCandidates(candidates: MemoryCandidate[]): MemoryCandidate[] {
             keywordScore: Math.max(previous.keywordScore ?? 0, candidate.keywordScore ?? 0),
             tagScore: Math.max(previous.tagScore ?? 0, candidate.tagScore ?? 0),
             temporalScore: Math.max(previous.temporalScore ?? 0, candidate.temporalScore ?? 0),
+            linkActivationScore: Math.max(
+                normalizeLinkActivation(previous.linkActivationScore),
+                normalizeLinkActivation(candidate.linkActivationScore),
+            ),
+            linkActivationPath: chooseLinkPath(previous.linkActivationPath, candidate.linkActivationPath),
         });
     }
     return [...merged.values()];
@@ -273,6 +308,7 @@ export function calculateMemoryFeatures(
         stability,
         mood: getMoodScore(memory, context),
         temporal: clamp(temporal),
+        linkActivation: normalizeLinkActivation(candidate.linkActivationScore),
     };
 }
 
@@ -326,6 +362,8 @@ export function rankMemoryCandidates(
                 score: scoreFeatures(features),
                 features,
                 sources: getCandidateSources(candidate),
+                linkActivationScore: candidate.linkActivationScore,
+                linkActivationPath: candidate.linkActivationPath,
                 protectedReason: getProtectedReason(candidate.memory, now, options.timezone),
                 clusterKey: getMemoryClusterKey(candidate.memory),
                 tokenCost: estimateMemoryTokens(candidate.memory.content),
