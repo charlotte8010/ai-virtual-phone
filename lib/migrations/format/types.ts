@@ -34,6 +34,8 @@ export interface MigrationAssetRef {
   fileName?: string;
   byteLength?: number;
   sha256?: string;
+  packagePath?: string;
+  missing?: boolean;
   source: MigrationSourceRef;
 }
 
@@ -218,4 +220,33 @@ export interface MigrationMemoryLink {
   createdAt?: string;
   source: MigrationSourceRef;
   metadata?: Record<string, unknown>;
+}
+
+export interface FloatMigrationPackagePayload {
+  identities: MigrationIdentity[];
+  characters: MigrationCharacter[];
+  relationships: MigrationRelationship[];
+  conversations: MigrationConversation[];
+  messages: MigrationMessage[];
+  moments: MigrationMoment[];
+  diaries: MigrationDiary[];
+  worlds: MigrationWorld[];
+  worldbooks: MigrationWorldbook[];
+  stories: MigrationStory[];
+  games: MigrationGame[];
+  schedules: MigrationSchedule[];
+  eventBoxes: MigrationEventBox[];
+  memories: MigrationMemory[];
+  futureIntents: MigrationFutureIntent[];
+  memoryLinks: MigrationMemoryLink[];
+  extended: Record<string, unknown>;
+  compat: Array<{ store: string; records: unknown[] }>;
+  provenance: {
+    idMap: Record<string, Record<string, string>>;
+    normalizationReport: unknown;
+    sourceManifest: unknown;
+    metadataRedactions: string[];
+    excludedSensitiveStores: Record<string, number>;
+    excludedRuntimeStores: Record<string, number>;
+  };
 }
