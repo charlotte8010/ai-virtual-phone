@@ -60,7 +60,32 @@ assert.match(lifecyclePrompt, /F0/);
 assert.match(lifecyclePrompt, /F1/);
 assert.match(lifecyclePrompt, /\[event_ref=classifier-event\]/);
 assert.doesNotMatch(lifecyclePrompt, /classifier-f0|classifier-f1/);
-assert.match(lifecyclePrompt, /只判断当前 exact event/);
+assert.match(lifecyclePrompt, /当前 \[E\] 事件/);
+assert.match(lifecyclePrompt, /你的唯一任务是：/);
+assert.match(lifecyclePrompt, /当前这一条真实事件/);
+assert.match(lifecyclePrompt, /不是聊天助手/);
+assert.match(lifecyclePrompt, /不负责创建无关的新计划/);
+assert.match(lifecyclePrompt, /只判断当前事件对已有 Future Intent/);
+assert.match(lifecyclePrompt, /\[E\]/);
+assert.match(lifecyclePrompt, /候选编号 F0、F1、F2……只是本次判断使用的临时引用/);
+assert.match(lifecyclePrompt, /不得输出、猜测或构造任何真实数据库 memory id/);
+assert.match(lifecyclePrompt, /一个事件最多改变一个已有 Future Intent/);
+assert.match(lifecyclePrompt, /fulfilled 必须有明确完成事实/);
+assert.match(lifecyclePrompt, /cancelled 必须有明确取消\/终止事实/);
+assert.match(lifecyclePrompt, /replaced 必须有明确修改\/替代事实/);
+assert.match(lifecyclePrompt, /当前事件是在询问是否完成、是否取消/);
+assert.match(lifecyclePrompt, /当前事件只是在讨论计划，而没有明确改变计划状态/);
+assert.match(lifecyclePrompt, /时间流逝不是完成证据/);
+assert.match(lifecyclePrompt, /overdue 完全由外部确定性代码处理/);
+assert.match(lifecyclePrompt, /你永远不要输出 action=overdue/);
+assert.match(lifecyclePrompt, /相对时间必须以“当前事件时间”为参考/);
+assert.match(lifecyclePrompt, /如果 replacement 的新时间无法可靠确定/);
+assert.match(lifecyclePrompt, /replacement\.type 只能是/);
+assert.match(lifecyclePrompt, /timePrecision 只能是/);
+assert.match(lifecyclePrompt, /targetEndAt 只在确实是时间范围时提供/);
+assert.match(lifecyclePrompt, /timezone 只能使用当前提供的有效参考时区/);
+assert.match(lifecyclePrompt, /严格只输出一个 JSON object/);
+assert.match(lifecyclePrompt, /如果无法完全满足上述 contract/);
 
 function lifecycleCandidatesFromEntries(entries) {
     return entries.map((entry, index) => ({
