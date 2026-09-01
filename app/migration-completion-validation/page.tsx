@@ -324,7 +324,8 @@ export default function MigrationCompletionValidationPage() {
         if (layout && typeof layout.mediaRef === "string") refs.push(layout.mediaRef);
         return refs;
       });
-      const badMediaRefs = mediaRefs.filter((ref) => !/^media-store:\/\/fm_media_[a-z0-9]+$/u.test(ref));
+      const plannedMediaRefs = new Set(first.dryRun.plan.media.map((entry) => entry.targetRef));
+      const badMediaRefs = mediaRefs.filter((ref) => !plannedMediaRefs.has(ref));
       if (badMediaRefs.length) throw new Error(`non-deterministic media refs: ${badMediaRefs.slice(0, 3).join(", ")}`);
 
       if (spies.counts.liveChatPushEvents !== 0) throw new Error(`live chat path fired ${spies.counts.liveChatPushEvents} times`);
