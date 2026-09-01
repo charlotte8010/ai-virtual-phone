@@ -44,13 +44,16 @@ export type TimePrecision =
     | "vague"
     | "unknown";
 
-export type MemoryLinkType =
+export type KnownMemoryLinkType =
     | "temporal"
     | "emotion"
     | "person"
     | "topic"
     | "causal"
     | "metaphor";
+
+/** Open-ended for forward-compatible imported or future-generated relations. */
+export type MemoryLinkType = KnownMemoryLinkType | (string & {});
 
 export interface MemoryLink {
     id: string;

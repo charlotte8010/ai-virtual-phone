@@ -11,6 +11,7 @@ context.__testMemories = [];
 context.__testLinks = [];
 context.__testConfig = null;
 context.__recallWrites = [];
+context.__linkLoadFailure = false;
 
 const mockSources = new Map([
     [resolve(repoRoot, "lib/memory-storage.ts"), `
@@ -22,6 +23,7 @@ const mockSources = new Map([
             globalThis.__recallWrites.push({ characterId, memoryIds: [...memoryIds], recalledAt, memoryStabilityEnabled });
         }
         export async function loadMemoryLinks(characterId) {
+            if (globalThis.__linkLoadFailure) throw new Error("simulated link load failure");
             return globalThis.__testLinks.filter(link => link.characterId === characterId);
         }
         export async function saveMemoryLink(link) {
@@ -143,9 +145,9 @@ assert.equal(normalizeMemoryLink({
     characterId: "char-1",
     fromMemoryId: "a",
     toMemoryId: "b",
-    type: "unknown",
+    type: "future_custom_relation",
     strength: 0.5,
-}), null);
+}).type, "future_custom_relation");
 assert.equal(normalizeMemoryLink({
     id: "infinite-strength",
     characterId: "char-1",
@@ -228,6 +230,7 @@ context.__testLinks = Array.from({ length: 20 }, (_, index) => link(`dense-link-
 const denseExpansion = await spreadMemoryActivation("char-1", ["dense-seed"], denseMemories);
 assert.ok(denseExpansion.candidates.length <= MAX_EXPANDED_MEMORY_LINKS, "dense graph must obey global cap");
 
+context.__testMemories = graphMemories;
 context.__testLinks = [link("existing", "seed", "neighbor-a", 0.99)];
 const created = await createMemoryLink({
     characterId: "char-1",
@@ -330,6 +333,18 @@ const selectionOptions = {
 };
 assert.equal(baselineSelection.debug.channelCounts.link, 0);
 assert.equal(baselineSelection.selected.some(entry => entry.id === "neighbor-a"), false);
+context.__linkLoadFailure = true;
+const unavailableSelection = await selectMemoriesForPrompt("char-1", "alpha", {
+    ...selectionOptions,
+    config,
+    debug: false,
+});
+context.__linkLoadFailure = false;
+assert.deepEqual(
+    Array.from(unavailableSelection.selected, entry => entry.id),
+    Array.from(baselineSelection.selected, entry => entry.id),
+    "unavailable links must fall back to baseline selection",
+);
 assert.deepEqual(
     Array.from((await selectMemoriesForPrompt("char-1", "alpha", {
         ...selectionOptions,

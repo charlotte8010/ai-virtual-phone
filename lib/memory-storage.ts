@@ -80,6 +80,16 @@ function runRequest<T>(req: IDBRequest<T>): Promise<T> {
     });
 }
 
+function scheduleMemoryLinkGeneration(entry: MemoryEntry): void {
+    if (entry.type !== "long_term") return;
+    void import("./memory-links")
+        .then(({ scheduleMemoryLinkBackfillForCharacter, scheduleMemoryLinkGenerationForEntry }) => {
+            scheduleMemoryLinkGenerationForEntry(entry);
+            scheduleMemoryLinkBackfillForCharacter(entry.characterId);
+        })
+        .catch(error => console.warn("[MemoryLinks] Post-save generation unavailable:", error));
+}
+
 // ── Long-term Entry CRUD ──
 
 export async function saveMemoryEntry(entry: MemoryEntry): Promise<void> {
@@ -95,6 +105,7 @@ export async function saveMemoryEntry(entry: MemoryEntry): Promise<void> {
     } finally {
         db.close();
     }
+    scheduleMemoryLinkGeneration(entry);
 }
 
 export async function loadMemoryEntries(characterId: string): Promise<MemoryEntry[]> {
@@ -194,6 +205,32 @@ export async function deleteMemoryLinks(ids: string[]): Promise<void> {
     }
 }
 
+/** Best-effort orphan cleanup; callers keep it off the primary write path. */
+export async function deleteMemoryLinksForMemoryIds(memoryIds: readonly string[]): Promise<void> {
+    const ids = new Set(memoryIds.filter(id => typeof id === "string" && id.length > 0));
+    if (ids.size === 0) return;
+    const db = await openDb();
+    if (!db) return;
+    try {
+        const readTx = db.transaction(LINK_STORE_NAME, "readonly");
+        const links: MemoryLink[] = await runRequest(readTx.objectStore(LINK_STORE_NAME).getAll());
+        const orphanLinkIds = links
+            .filter(link => ids.has(link.fromMemoryId) || ids.has(link.toMemoryId))
+            .map(link => link.id);
+        if (orphanLinkIds.length === 0) return;
+        const writeTx = db.transaction(LINK_STORE_NAME, "readwrite");
+        const store = writeTx.objectStore(LINK_STORE_NAME);
+        for (const id of orphanLinkIds) store.delete(id);
+        await new Promise<void>((resolve, reject) => {
+            writeTx.oncomplete = () => resolve();
+            writeTx.onerror = () => reject(writeTx.error ?? new Error("Memory link orphan cleanup failed"));
+            writeTx.onabort = () => reject(writeTx.error ?? new Error("Memory link orphan cleanup aborted"));
+        });
+    } finally {
+        db.close();
+    }
+}
+
 /** Persist lifecycle changes, including old/new replacement pairs, atomically. */
 export async function saveMemoryEntries(entries: MemoryEntry[]): Promise<void> {
     if (entries.length === 0) return;
@@ -266,6 +303,8 @@ export async function deleteMemoryEntry(id: string): Promise<void> {
     } finally {
         db.close();
     }
+    void deleteMemoryLinksForMemoryIds([id])
+        .catch(error => console.warn("[MemoryLinks] Orphan cleanup failed after memory delete:", error));
 }
 
 export async function deleteMemoryEntries(ids: string[]): Promise<void> {
@@ -285,6 +324,8 @@ export async function deleteMemoryEntries(ids: string[]): Promise<void> {
     } finally {
         db.close();
     }
+    void deleteMemoryLinksForMemoryIds(ids)
+        .catch(error => console.warn("[MemoryLinks] Orphan cleanup failed after memory delete:", error));
 }
 
 export async function deleteCharacterMemories(characterId: string): Promise<void> {

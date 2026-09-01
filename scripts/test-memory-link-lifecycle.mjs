@@ -134,6 +134,14 @@ const legacyEmotional = normalizeMemoryLink({
 });
 assert.equal(legacyEmotional.type, "emotion");
 assert.equal(normalizeMemoryLink({
+    id: "legacy-temporal",
+    characterId: "char-1",
+    fromMemoryId: "a",
+    toMemoryId: "b",
+    type: "temporal",
+    strength: 0.8,
+}).type, "temporal");
+assert.equal(normalizeMemoryLink({
     id: "future-type",
     characterId: "char-1",
     fromMemoryId: "a",
@@ -145,21 +153,27 @@ assert.equal(normalizeMemoryLink({
 const seed = memory("seed-20", { embedding: [1, 0] });
 const related = memory("related-21", { embedding: [0.99, 0.01] });
 const unrelated = memory("unrelated-22", { embedding: [0, 1] });
-context.__testMemories = [seed, related, unrelated];
-context.__testLinks = [{ ...legacyEmotional, toMemoryId: "related-21" }];
+const extraMemories = Array.from({ length: 30 }, (_, index) => memory(`extra-${index}`));
+context.__testMemories = [seed, related, unrelated, ...extraMemories];
+context.__testLinks = [
+    { ...legacyEmotional, fromMemoryId: "seed-20", toMemoryId: "related-21" },
+    { ...legacyEmotional, id: "future-relation", type: "future_custom_relation", fromMemoryId: "seed-20", toMemoryId: "unrelated-22" },
+];
 const legacyExpansion = await spreadMemoryActivation("char-1", ["seed-20"], context.__testMemories);
 assert.equal(legacyExpansion.candidates.some(candidate => candidate.memoryId === "related-21"), true);
+assert.equal(legacyExpansion.candidates.some(candidate => candidate.memoryId === "unrelated-22"), true);
 
 context.__testLinks = [];
 const generated = await maybeGenerateMemoryLinksForEntry(seed, {
-    candidateEntries: [related, unrelated, ...Array.from({ length: 30 }, (_, index) => memory(`extra-${index}`))],
+    candidateEntries: [related, unrelated, ...extraMemories],
 });
 assert.equal(generated.status, "created");
 assert.ok(generated.createdCount > 0, "a new long-term memory should form semantic links");
 assert.ok(context.__testLinks.length <= MAX_GENERATED_LINKS_PER_MEMORY * 2, "generation must remain bounded");
+assert.ok(generated.consideredCount <= MAX_LINK_GENERATION_CANDIDATES, "generation must use a bounded candidate pool");
 const linkIdsAfterFirstGeneration = Array.from(context.__testLinks, link => link.id).sort();
 const generatedAgain = await maybeGenerateMemoryLinksForEntry(seed, {
-    candidateEntries: [related, unrelated, ...Array.from({ length: 30 }, (_, index) => memory(`extra-${index}`))],
+    candidateEntries: [related, unrelated, ...extraMemories],
 });
 assert.ok(["created", "unchanged", "skipped"].includes(generatedAgain.status));
 assert.deepEqual(Array.from(context.__testLinks, link => link.id).sort(), linkIdsAfterFirstGeneration);
@@ -173,7 +187,6 @@ await assert.doesNotReject(
 context.__linkWriteFailure = false;
 
 localStorageState.clear();
-context.__testLinks = [];
 const backfillMemories = Array.from({ length: 4 }, (_, index) => memory(`backfill-${20 + index}`, {
     content: `相似主题 ${index}`,
     embedding: [1, 0],
@@ -181,6 +194,16 @@ const backfillMemories = Array.from({ length: 4 }, (_, index) => memory(`backfil
     lastAccessedAt: "2026-08-20T13:00:00.000Z",
     stability: 0.7,
 }));
+context.__testLinks = [{
+    id: "preserved-link",
+    characterId: "char-1",
+    fromMemoryId: "backfill-20",
+    toMemoryId: "backfill-21",
+    type: "temporal",
+    strength: 0.95,
+    createdAt: "2026-08-20T12:00:00.000Z",
+    updatedAt: "2026-08-20T12:00:00.000Z",
+}];
 context.__testMemories = backfillMemories;
 const statsBeforeBackfill = backfillMemories.map(entry => ({
     id: entry.id,
@@ -192,6 +215,7 @@ const firstBackfill = await runMemoryLinkBackfill("char-1", { batchSize: 2 });
 assert.equal(firstBackfill.status, "paused");
 assert.ok(firstBackfill.processedCount > 0);
 assert.ok(context.__testLinks.length > 0, "first backfill pass should create valid links");
+assert.ok(context.__testLinks.some(link => link.id === "preserved-link"), "backfill must preserve existing valid links");
 const secondBackfill = await runMemoryLinkBackfill("char-1", { batchSize: 2 });
 assert.equal(secondBackfill.status, "complete");
 const linkIdsAfterBackfill = Array.from(context.__testLinks, link => link.id).sort();
