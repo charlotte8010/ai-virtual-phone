@@ -149,6 +149,7 @@ export interface NativeMigrationReconciliation {
   storyMessages: DomainReconciliation<StoryMessage>;
   archive: "create" | "reuse" | "conflict";
   idMap: "create" | "reuse" | "conflict";
+  resolvedIdMap: Record<string, Record<string, string>>;
   totals: { create: number; reuse: number; skip: number; conflicts: number };
 }
 

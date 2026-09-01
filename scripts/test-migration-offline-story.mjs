@@ -169,6 +169,16 @@ try {
   assert.equal(summary.chatMessages, 4708);
   assert.equal(summary.storyMessages, 445);
   assert.equal(summary.storySessions, 1);
+  assert.equal(summary.assets, 79);
+  assert.equal(summary.diary, 1);
+  assert.equal(summary.worldbooks, 14);
+  assert.equal(summary.activeMemories, 250);
+  assert.equal(summary.archivedMemories, 147);
+  assert.equal(summary.activeFutureIntents, 4);
+  assert.equal(summary.archivedWindowsill, 5);
+  assert.equal(summary.memoryLinks, 32667);
+  assert.equal(summary.legacyCoreSummaries, 11);
+  assert.equal(summary.timelineRecords, 0);
   assert.equal(plan.messages.length, 4708);
   assert.equal(plan.storyMessages.length, 445);
   assert.equal(plan.storySessions.length, 1);
@@ -263,7 +273,7 @@ try {
         created.archive = ["archive"];
       }
       if (reconciliation.idMap === "create") {
-        this.snapshot.idMap = structuredClone(reconciliation.idMapValues);
+        this.snapshot.idMap = structuredClone(reconciliation.resolvedIdMap);
         created.idMap = ["idmap"];
       }
       return { created, warnings: [], failures: [] };
@@ -306,10 +316,16 @@ try {
   assert.equal(first.dryRun.reconciliation.storyMessages.create.length, 445);
   assert.equal(first.dryRun.reconciliation.storySessions.reuse.length, 0);
   assert.equal(first.dryRun.reconciliation.storyMessages.conflicts.length, 0);
+  assert.equal(first.dryRun.reconciliation.totals.create, 5528);
+  assert.equal(first.dryRun.reconciliation.totals.conflicts, 0);
 
   const applied = await applyFloatMigrationPackage(inputBytes, { storage: storageAfterApply });
   assert.equal(applied.ok, true, JSON.stringify(applied.expectedVsActual));
   assert.equal(applied.expectedVsActual.remainingCreatesAfterApply, 0);
+  assert.equal(applied.expectedVsActual.plannedCreates, 5528);
+  assert.equal(applied.expectedVsActual.actualCreates, 5528);
+  assert.equal(applied.expectedVsActual.failed, 0);
+  assert.equal(applied.expectedVsActual.warnings, 0);
   assert.equal(storageAfterApply.snapshot.messages.length, 4708);
   assert.equal(storageAfterApply.snapshot.storySessions.length, 1);
   assert.equal(storageAfterApply.snapshot.storyMessages.length, 445);
@@ -320,6 +336,7 @@ try {
   assert.equal(second.ok, true, JSON.stringify(second.expectedVsActual));
   assert.equal(second.expectedVsActual.actualCreates, 0);
   assert.equal(second.dryRun.reconciliation.totals.create, 0);
+  assert.equal(second.expectedVsActual.remainingCreatesAfterApply, 0);
   assert.equal(storageAfterApply.snapshot.storySessions.length, 1);
   assert.equal(storageAfterApply.snapshot.storyMessages.length, 445);
 
@@ -328,6 +345,18 @@ try {
   assert.equal(storageAfterApply.snapshot.storySessions.length, 0);
   assert.equal(storageAfterApply.snapshot.storyMessages.length, 0);
   assert.equal(storageAfterApply.snapshot.messages.length, 0);
+  assert.equal(storageAfterApply.snapshot.identities.length, 0);
+  assert.equal(storageAfterApply.snapshot.characters.length, 0);
+  assert.equal(storageAfterApply.snapshot.contacts.length, 0);
+  assert.equal(storageAfterApply.snapshot.sessions.length, 0);
+  assert.equal(storageAfterApply.snapshot.mediaIds.length, 0);
+  assert.equal(storageAfterApply.snapshot.diaries.length, 0);
+  assert.equal(storageAfterApply.snapshot.worlds.length, 0);
+  assert.equal(storageAfterApply.snapshot.worldbooks.length, 0);
+  assert.equal(storageAfterApply.snapshot.calendar.length, 0);
+  assert.equal(storageAfterApply.snapshot.memories.length, 0);
+  assert.equal(storageAfterApply.snapshot.archive, undefined);
+  assert.equal(storageAfterApply.snapshot.idMap, undefined);
 
   const existingStorage = new MemoryStorage();
   const existingPlan = plan;

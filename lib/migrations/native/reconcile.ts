@@ -98,6 +98,45 @@ function reconcileStorySessions(
   return { reconciliation: { create, reuse, skip, conflicts }, actualIdByPlannedId };
 }
 
+function resolveIdMap(
+  planned: NativeMigrationPlan["idMap"],
+  storySessionIds: Map<string, string>,
+): NativeMigrationPlan["idMap"] {
+  const resolved = Object.fromEntries(Object.entries(planned).map(([bucket, values]) => [bucket, { ...values }])) as NativeMigrationPlan["idMap"];
+  const plannedStorySessions = resolved.storySessions;
+  if (plannedStorySessions) {
+    resolved.storySessions = Object.fromEntries(Object.entries(plannedStorySessions).map(([sourceId, plannedId]) => [
+      sourceId,
+      storySessionIds.get(plannedId) ?? plannedId,
+    ]));
+  }
+  return resolved;
+}
+
+function protectNewStorySessionPointers(
+  sessions: NativeMigrationReconciliation["storySessions"],
+  messages: NativeMigrationReconciliation["storyMessages"],
+): NativeMigrationReconciliation["storySessions"] {
+  const conflictingIds = new Set(messages.conflicts.map((entry) => entry.planned.id));
+  if (!conflictingIds.size) return sessions;
+  const safeMessages = [...messages.create, ...messages.reuse];
+  return {
+    ...sessions,
+    create: sessions.create.map((session) => {
+      if (!session.lastMessageId || !conflictingIds.has(session.lastMessageId)) return session;
+      const fallback = safeMessages
+        .filter((message) => message.sessionId === session.id)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+        .at(-1);
+      if (fallback) {
+        return { ...session, lastMessageId: fallback.id, lastMessagePreview: fallback.rawContent.slice(0, 120) };
+      }
+      const { lastMessageId: _lastMessageId, lastMessagePreview: _lastMessagePreview, ...withoutLastMessage } = session;
+      return withoutLastMessage;
+    }),
+  };
+}
+
 export function reconcileNativeMigrationPlan(plan: NativeMigrationPlan, existing: NativeMigrationSnapshot): NativeMigrationReconciliation {
   const identities = reconcileRecords(plan.identities.map((entry) => entry.value), existing.identities, (entry) => entry.id);
   const characters = reconcileRecords(plan.characters.map((entry) => entry.value), existing.characters, (entry) => entry.id);
@@ -130,15 +169,17 @@ export function reconcileNativeMigrationPlan(plan: NativeMigrationPlan, existing
     return sessionId === message.sessionId ? message : { ...message, sessionId };
   });
   const storyMessages = reconcileRecords(remappedStoryMessages, existing.storyMessages, (entry) => entry.id);
+  const storySessions = protectNewStorySessionPointers(storySessionResult.reconciliation, storyMessages);
+  const resolvedIdMap = resolveIdMap(plan.idMap, storySessionResult.actualIdByPlannedId);
   const archive = existing.archive === undefined
     ? "create"
     : stableValue(existing.archive) === stableValue(plan.archive) ? "reuse" : "conflict";
   const idMap = existing.idMap === undefined
     ? "create"
-    : stableValue(existing.idMap) === stableValue(plan.idMap) ? "reuse" : "conflict";
+    : stableValue(existing.idMap) === stableValue(resolvedIdMap) ? "reuse" : "conflict";
   const parts: Array<DomainReconciliation<unknown>> = [
     identities, characters, contacts, sessions, messages, media, moments, momentComments,
-    diaries, worlds, worldbooks, calendar, memories, storySessionResult.reconciliation, storyMessages,
+    diaries, worlds, worldbooks, calendar, memories, storySessions, storyMessages,
   ];
   const totals = totalsOf(parts);
   totals.create += archive === "create" ? 1 : 0;
@@ -150,8 +191,8 @@ export function reconcileNativeMigrationPlan(plan: NativeMigrationPlan, existing
   return {
     identities, characters, contacts, sessions, messages, media, moments, momentComments, diaries,
     worlds, worldbooks, calendar, memories,
-    storySessions: storySessionResult.reconciliation,
+    storySessions,
     storyMessages,
-    archive, idMap, totals,
+    archive, idMap, resolvedIdMap, totals,
   };
 }

@@ -320,7 +320,7 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
       }
       if (reconciliation.idMap === "create") {
         const key = idMapKey(plan.sourceFingerprint);
-        await kvSetAsync(key, JSON.stringify(plan.idMap));
+        await kvSetAsync(key, JSON.stringify(reconciliation.resolvedIdMap));
         created.idMap = [key];
       }
     } catch (error) {
@@ -579,7 +579,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
           }
           if (reconciliation.idMap === "create") {
             const key = idMapKey(plan.sourceFingerprint);
-            await this.db.meta.put({ key, value: JSON.stringify(plan.idMap) });
+            await this.db.meta.put({ key, value: JSON.stringify(reconciliation.resolvedIdMap) });
             created.idMap = [key];
           }
         },
