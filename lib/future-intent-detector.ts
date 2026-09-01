@@ -37,6 +37,7 @@ export type FutureIntentDetectionResult = {
 
 const FUTURE_TIME_PATTERN = /今天(?:晚上|晚|下午|傍晚|夜里)?|今晚|明(?:天|早|晚)|后天|这周|本周|周[一二三四五六日天]|周末|下周|月底|下个月|生日|纪念日|以后|到时候|下次|改天|有空|等你回来|等我忙完|忙完以后|毕业以后|回来以后|哪天/u;
 const FUTURE_INTENT_ACTION_PATTERN = /记得|别忘了|约好|答应|说好了|一起|计划|准备|希望|想要|一定会|陪|承诺|安排|约|见面|吃饭|看电影|叫我|叫你|提醒我|提醒|通知我|通知|到点|带你|旅行|找你/u;
+const FUTURE_INTENT_MODAL_PATTERN = /会|将|即将|打算|决定|愿意|之后|结束后|完成后|届时|未来|有一天|某天/u;
 const FUTURE_INTENT_QUERY_PATTERN = /(?:想知道|想问|请问|什么意思|怎么(?:办|做|理解)|为什么|是否|吗[？?]?$)/u;
 const MEMORY_MOODS = new Set([
     "neutral", "happy", "tender", "excited", "sad", "angry", "anxious",
@@ -131,11 +132,14 @@ function sanitizeFutureIntent(value: unknown): FutureIntentMeta {
     };
 }
 
-/** Cheap local gate: it decides whether asking the model is worthwhile. */
+/** High-recall local gate; the semantic detector remains the final authority. */
 export function hasFutureIntentSignal(text: string): boolean {
     const normalized = String(text ?? "").replace(/\s+/g, "");
     if (!normalized || FUTURE_INTENT_QUERY_PATTERN.test(normalized)) return false;
-    return FUTURE_TIME_PATTERN.test(normalized) && FUTURE_INTENT_ACTION_PATTERN.test(normalized);
+    return (
+        (FUTURE_TIME_PATTERN.test(normalized) && FUTURE_INTENT_ACTION_PATTERN.test(normalized))
+        || FUTURE_INTENT_MODAL_PATTERN.test(normalized)
+    );
 }
 
 export function buildFutureIntentPrompt(

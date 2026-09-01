@@ -44,6 +44,7 @@ assert.equal(detector.hasFutureIntentSignal("明晚八点一起看电影"), true
 assert.equal(detector.hasFutureIntentSignal("我答应周五陪你去医院"), true);
 assert.equal(detector.hasFutureIntentSignal("明早八点叫我"), true);
 assert.equal(detector.hasFutureIntentSignal("今晚提醒我"), true);
+assert.equal(detector.hasFutureIntentSignal("我会在项目结束后搬家"), true, "broad future modality must reach semantic detection");
 assert.equal(detector.hasFutureIntentSignal("刚才一起看了电影"), false);
 assert.equal(detector.hasFutureIntentSignal("明天的天气不错"), false);
 for (const text of [

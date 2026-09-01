@@ -1,6 +1,6 @@
 // High-level memory orchestration: candidate generation, ranking, and prompt selection.
 
-import type { MemoryConfig, MemoryEntry } from "./memory-types";
+import type { MemoryConfig, MemoryEntry, MemoryLinkActivationPath } from "./memory-types";
 import { loadMemoryConfig, loadMemoryEntriesByType, updateMemoryRecallStats } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { generateEmbedding, resolveEmbeddingModel, cosineSimilarity } from "./memory-embedding";
@@ -9,22 +9,97 @@ import { searchMemoryText } from "./memory-text-search";
 import {
     rankMemoryCandidates,
     selectRankedMemoryCandidates,
+    selectRankedMemoryCandidatesWithTrace,
     type MemoryCandidate,
     type MemoryCandidateSource,
+    type MemoryFeatures,
     type MemoryRankingOptions,
+    type MemorySelectionDecision,
+    type MemorySelectionDecisionReason,
     type MemorySelectionOptions as RankingSelectionOptions,
+    type RankedMemoryCandidate,
 } from "./memory-ranking";
 import { getRecallMemoryIds, type RecallWriteGuard } from "./memory-recall-stats";
+import { MAX_LINK_SEEDS, spreadMemoryActivation, type MemoryLinkExpansion } from "./memory-links";
 
 const VECTOR_TOP_K = 20;
 const KEYWORD_TOP_K = 20;
 const RECENT_TOP_K = 10;
+
+function normalizeLinkActivation(value: number | undefined): number {
+    return Number.isFinite(value ?? Number.NaN)
+        ? Math.min(1, Math.max(0, value ?? 0))
+        : 0;
+}
+
+function linkPathKey(path: MemoryLinkActivationPath | undefined): string {
+    if (!path) return "";
+    return [
+        path.seedMemoryIds.join(","),
+        path.memoryIds.join(">"),
+        path.linkIds.join(">"),
+    ].join("|");
+}
+
+function chooseLinkPath(
+    left: MemoryLinkActivationPath | undefined,
+    right: MemoryLinkActivationPath | undefined,
+): MemoryLinkActivationPath | undefined {
+    if (!left) return right;
+    if (!right) return left;
+    if (right.activation !== left.activation) return right.activation > left.activation ? right : left;
+    if (right.depth !== left.depth) return right.depth < left.depth ? right : left;
+    return linkPathKey(right) < linkPathKey(left) ? right : left;
+}
+
+function cloneLinkActivationPath(path: MemoryLinkActivationPath): MemoryLinkActivationPath {
+    return {
+        ...path,
+        seedMemoryIds: [...path.seedMemoryIds],
+        memoryIds: [...path.memoryIds],
+        linkIds: [...path.linkIds],
+    };
+}
 
 export interface MemorySelectionOptions extends MemoryRankingOptions, RankingSelectionOptions {
     config?: MemoryConfig;
     vectorTopK?: number;
     keywordTopK?: number;
     recentTopK?: number;
+    /** Opt-in candidate-level retrieval instrumentation. It never writes memory state. */
+    debug?: boolean;
+    debugCollector?: MemoryRetrievalDebugCollector;
+}
+
+export interface MemoryRetrievalDebugLimits {
+    vectorTopK: number;
+    keywordTopK: number;
+    recentTopK: number;
+    tokenBudget: number;
+    maxSelected: number;
+    maxProtectedFutureIntents: number;
+    maxPerCluster: number;
+}
+
+export interface MemoryRetrievalDebugCandidate {
+    memoryId: string;
+    sourceApp: MemoryEntry["sourceApp"];
+    sources: MemoryCandidateSource[];
+    featureScores: MemoryFeatures;
+    finalScore: number;
+    tokenCost: number;
+    protectedReason?: string;
+    selected: boolean;
+    selectionReason?: MemorySelectionDecisionReason;
+    rejectionReason?: MemorySelectionDecisionReason;
+    linkActivation?: MemoryLinkActivationPath;
+}
+
+export interface MemoryRetrievalLinkExpansion {
+    enabled: boolean;
+    seedMemoryIds: string[];
+    expandedMemoryIds: string[];
+    limits: MemoryLinkExpansion["limits"];
 }
 
 export interface MemoryRetrievalDebug {
@@ -36,12 +111,58 @@ export interface MemoryRetrievalDebug {
     selectedIds: string[];
     protectedIds: string[];
     usedTokens: number;
+    characterId: string;
+    query: string;
+    timestamp: string;
+    limits: MemoryRetrievalDebugLimits;
+    /** Present only when debug=true (or a collector is supplied). */
+    candidates?: MemoryRetrievalDebugCandidate[];
+    selectedMemoryIds: string[];
+    /** Populated by a collector after the prompt assembler confirms injection. */
+    injectedMemoryIds: string[];
+    linkExpansion?: MemoryRetrievalLinkExpansion;
 }
 
 export interface MemorySelectionResult {
     selected: MemoryEntry[];
     futureIntents: MemoryEntry[];
     debug?: MemoryRetrievalDebug;
+}
+
+export interface MemoryRetrievalDebugSnapshot {
+    retrieval?: MemoryRetrievalDebug;
+    injectedMemoryIds: string[];
+}
+
+export interface MemoryRetrievalDebugCollector {
+    recordRetrieval(debug: MemoryRetrievalDebug): void;
+    recordInjectedMemoryIds(memoryIds: readonly string[]): void;
+    getSnapshot(): MemoryRetrievalDebugSnapshot;
+}
+
+/** Create an in-memory debug session for retrieval and confirmed prompt injection. */
+export function createMemoryRetrievalDebugCollector(): MemoryRetrievalDebugCollector {
+    let retrieval: MemoryRetrievalDebug | undefined;
+    let injectedMemoryIds: string[] = [];
+    return {
+        recordRetrieval(debug): void {
+            retrieval = cloneRetrievalDebug(debug);
+        },
+        recordInjectedMemoryIds(memoryIds): void {
+            injectedMemoryIds = [...new Set([
+                ...injectedMemoryIds,
+                ...memoryIds.filter(id => typeof id === "string" && id.trim().length > 0),
+            ])];
+        },
+        getSnapshot(): MemoryRetrievalDebugSnapshot {
+            return {
+                retrieval: retrieval
+                    ? { ...cloneRetrievalDebug(retrieval), injectedMemoryIds: [...injectedMemoryIds] }
+                    : undefined,
+                injectedMemoryIds: [...injectedMemoryIds],
+            };
+        },
+    };
 }
 
 export function shouldUseCognitiveRetrieval(config: MemoryConfig): boolean {
@@ -58,39 +179,56 @@ export async function selectMemoriesForPrompt(
     options: MemorySelectionOptions = {},
 ): Promise<MemorySelectionResult> {
     const config = options.config ?? loadMemoryConfig();
+    const debugEnabled = options.debug === true || options.debugCollector !== undefined;
+    const debugLimits = resolveDebugLimits(config, options);
+    const debugTimestamp = resolveDebugTimestamp(options.now);
     if (!shouldUseCognitiveRetrieval(config)) {
         const selected = await retrieveLegacyMemoriesForPrompt(characterId, currentContext, config);
+        const debug = buildDebugResult({
+            mode: "legacy",
+            characterId,
+            query: currentContext,
+            timestamp: debugTimestamp,
+            limits: debugLimits,
+            totalMemories: selected.length,
+            ranked: [],
+            selectedIds: selected.map(entry => entry.id),
+            selectedCount: selected.length,
+            protectedIds: [],
+            usedTokens: selected.reduce((total, entry) => total + estimateTokens(entry.content) + 4, 0),
+            channelCounts: { vector: 0, keyword: 0, future_intent: 0, recent: 0, link: 0 },
+            debugEnabled,
+            debugCollector: options.debugCollector,
+        });
         return {
             selected,
             futureIntents: selected.filter(entry => entry.kind === "future_intent"),
-            debug: {
-                mode: "legacy",
-                totalMemories: selected.length,
-                candidateCount: selected.length,
-                channelCounts: { vector: 0, keyword: 0, future_intent: 0, recent: 0 },
-                selectedCount: selected.length,
-                selectedIds: selected.map(entry => entry.id),
-                protectedIds: [],
-                usedTokens: selected.reduce((total, entry) => total + estimateTokens(entry.content) + 4, 0),
-            },
+            debug,
         };
     }
 
     const memories = await loadMemoryEntriesByType(characterId, "long_term");
     if (memories.length === 0) {
+        const debug = buildDebugResult({
+            mode: "hybrid",
+            characterId,
+            query: currentContext,
+            timestamp: debugTimestamp,
+            limits: debugLimits,
+            totalMemories: memories.length,
+            ranked: [],
+            selectedIds: [],
+            selectedCount: 0,
+            protectedIds: [],
+            usedTokens: 0,
+            channelCounts: { vector: 0, keyword: 0, future_intent: 0, recent: 0, link: 0 },
+            debugEnabled,
+            debugCollector: options.debugCollector,
+        });
         return {
             selected: [],
             futureIntents: [],
-            debug: {
-                mode: "hybrid",
-                totalMemories: memories.length,
-                candidateCount: 0,
-                channelCounts: { vector: 0, keyword: 0, future_intent: 0, recent: 0 },
-                selectedCount: 0,
-                selectedIds: [],
-                protectedIds: [],
-                usedTokens: 0,
-            },
+            debug,
         };
     }
 
@@ -100,6 +238,7 @@ export async function selectMemoriesForPrompt(
         keyword: 0,
         future_intent: 0,
         recent: 0,
+        link: 0,
     };
     const addCandidate = (candidate: MemoryCandidate): void => {
         const previous = candidatesById.get(candidate.memory.id);
@@ -122,6 +261,11 @@ export async function selectMemoriesForPrompt(
             keywordScore: Math.max(previous.keywordScore ?? 0, candidate.keywordScore ?? 0),
             tagScore: Math.max(previous.tagScore ?? 0, candidate.tagScore ?? 0),
             temporalScore: Math.max(previous.temporalScore ?? 0, candidate.temporalScore ?? 0),
+            linkActivationScore: Math.max(
+                normalizeLinkActivation(previous.linkActivationScore),
+                normalizeLinkActivation(candidate.linkActivationScore),
+            ),
+            linkActivationPath: chooseLinkPath(previous.linkActivationPath, candidate.linkActivationPath),
         });
     };
 
@@ -194,8 +338,36 @@ export async function selectMemoriesForPrompt(
         now: options.now ?? new Date(),
         timezone: options.timezone,
     };
-    const ranked = rankMemoryCandidates([...candidatesById.values()], currentContext, rankingOptions);
-    const selectedRanked = selectRankedMemoryCandidates(ranked, {
+    let ranked = rankMemoryCandidates([...candidatesById.values()], currentContext, rankingOptions);
+    let linkExpansion: MemoryRetrievalLinkExpansion | undefined;
+    if (config.memoryLinksEnabled !== false) {
+        const expansion = await spreadMemoryActivation(
+            characterId,
+            ranked.slice(0, MAX_LINK_SEEDS).map(candidate => candidate.memory.id),
+            memories,
+        );
+        for (const candidate of expansion.candidates) {
+            const memory = memories.find(entry => entry.id === candidate.memoryId);
+            if (!memory) continue;
+            channelCounts.link += 1;
+            addCandidate({
+                memory,
+                source: "link",
+                linkActivationScore: candidate.linkActivationScore,
+                linkActivationPath: candidate.linkActivationPath,
+            });
+        }
+        ranked = rankMemoryCandidates([...candidatesById.values()], currentContext, rankingOptions);
+        linkExpansion = {
+            enabled: true,
+            seedMemoryIds: [...expansion.seedMemoryIds],
+            expandedMemoryIds: expansion.candidates
+                .filter(candidate => memories.some(entry => entry.id === candidate.memoryId))
+                .map(candidate => candidate.memoryId),
+            limits: { ...expansion.limits },
+        };
+    }
+    const selectionOptions: RankingSelectionOptions = {
         tokenBudget: options.tokenBudget ?? options.longTermTokenBudget ?? config.longTermTokenBudget,
         maxSelected: options.maxSelected ?? (
             options.maxSelectedLongTermMemories === undefined
@@ -206,21 +378,34 @@ export async function selectMemoriesForPrompt(
             ?? (options.maxSelected === undefined ? config.maxSelectedLongTermMemories : undefined),
         maxProtectedFutureIntents: options.maxProtectedFutureIntents ?? config.maxProtectedFutureIntents,
         maxPerCluster: options.maxPerCluster,
-    });
+    };
+    const selectionTrace = debugEnabled
+        ? selectRankedMemoryCandidatesWithTrace(ranked, selectionOptions)
+        : undefined;
+    const selectedRanked = selectionTrace?.selected ?? selectRankedMemoryCandidates(ranked, selectionOptions);
     const selected = selectedRanked.map(item => item.memory);
+    const debug = buildDebugResult({
+        mode: "hybrid",
+        characterId,
+        query: currentContext,
+        timestamp: debugTimestamp,
+        limits: debugLimits,
+        totalMemories: memories.length,
+        ranked,
+        selectionDecisions: selectionTrace?.decisions,
+        selectedIds: selected.map(entry => entry.id),
+        selectedCount: selected.length,
+        protectedIds: selectedRanked.filter(item => item.protectedReason).map(item => item.memory.id),
+        usedTokens: selectedRanked.reduce((total, item) => total + item.tokenCost, 0),
+        channelCounts,
+        linkExpansion,
+        debugEnabled,
+        debugCollector: options.debugCollector,
+    });
     return {
         selected,
         futureIntents: selected.filter(entry => entry.kind === "future_intent"),
-        debug: {
-            mode: "hybrid",
-            totalMemories: memories.length,
-            candidateCount: ranked.length,
-            channelCounts,
-            selectedCount: selected.length,
-            selectedIds: selected.map(entry => entry.id),
-            protectedIds: selectedRanked.filter(item => item.protectedReason).map(item => item.memory.id),
-            usedTokens: selectedRanked.reduce((total, item) => total + item.tokenCost, 0),
-        },
+        debug,
     };
 }
 
@@ -228,12 +413,14 @@ export async function retrieveMemoriesForPrompt(
     characterId: string,
     currentContext: string,
     config: MemoryConfig,
+    options: Omit<MemorySelectionOptions, "config"> = {},
 ): Promise<MemoryEntry[]> {
-    return (await selectMemoriesForPrompt(characterId, currentContext, { config })).selected;
+    return (await selectMemoriesForPrompt(characterId, currentContext, { ...options, config })).selected;
 }
 
 export type MemoryRecallCommitOptions = RecallWriteGuard & {
     recalledAt?: string;
+    debugCollector?: MemoryRetrievalDebugCollector;
 };
 
 /**
@@ -247,6 +434,7 @@ export async function commitMemoryRecall(
 ): Promise<void> {
     const selectedIds = getRecallMemoryIds(memoryIds, options);
     if (selectedIds.length === 0) return;
+    options.debugCollector?.recordInjectedMemoryIds(selectedIds);
 
     try {
         await updateMemoryRecallStats(
@@ -274,6 +462,131 @@ export function createMemoryRecallCallback(
 
     return () => {
         void commitMemoryRecall(characterId, selectedIds, options);
+    };
+}
+
+type DebugResultInput = {
+    mode: MemoryRetrievalDebug["mode"];
+    characterId: string;
+    query: string;
+    timestamp: string;
+    limits: MemoryRetrievalDebugLimits;
+    totalMemories: number;
+    ranked: RankedMemoryCandidate[];
+    selectionDecisions?: MemorySelectionDecision[];
+    selectedIds: string[];
+    selectedCount: number;
+    protectedIds: string[];
+    usedTokens: number;
+    channelCounts: Record<MemoryCandidateSource, number>;
+    linkExpansion?: MemoryRetrievalLinkExpansion;
+    debugEnabled: boolean;
+    debugCollector?: MemoryRetrievalDebugCollector;
+};
+
+function buildDebugResult(input: DebugResultInput): MemoryRetrievalDebug {
+    const debug: MemoryRetrievalDebug = {
+        mode: input.mode,
+        totalMemories: input.totalMemories,
+        candidateCount: input.ranked.length,
+        channelCounts: { ...input.channelCounts },
+        selectedCount: input.selectedCount,
+        selectedIds: [...input.selectedIds],
+        protectedIds: [...input.protectedIds],
+        usedTokens: input.usedTokens,
+        characterId: input.characterId,
+        query: input.query,
+        timestamp: input.timestamp,
+        limits: { ...input.limits },
+        selectedMemoryIds: [...input.selectedIds],
+        injectedMemoryIds: [],
+        ...(input.linkExpansion ? {
+            linkExpansion: {
+                enabled: input.linkExpansion.enabled,
+                seedMemoryIds: [...input.linkExpansion.seedMemoryIds],
+                expandedMemoryIds: [...input.linkExpansion.expandedMemoryIds],
+                limits: { ...input.linkExpansion.limits },
+            },
+        } : {}),
+    };
+    if (input.debugEnabled) {
+        const decisions = new Map(
+            input.selectionDecisions?.map(decision => [decision.candidate.memory.id, decision]) ?? [],
+        );
+        debug.candidates = input.ranked.map(candidate => {
+            const decision = decisions.get(candidate.memory.id);
+            const selected = decision?.selected ?? input.selectedIds.includes(candidate.memory.id);
+            return {
+                memoryId: candidate.memory.id,
+                sourceApp: candidate.memory.sourceApp,
+                sources: [...candidate.sources],
+                featureScores: { ...candidate.features },
+                finalScore: candidate.score,
+                tokenCost: candidate.tokenCost,
+                ...(candidate.protectedReason ? { protectedReason: candidate.protectedReason } : {}),
+                selected,
+                ...(selected
+                    ? { selectionReason: decision?.reason ?? "ranked" }
+                    : { rejectionReason: decision?.reason ?? "lower_rank" }),
+                ...(candidate.linkActivationPath ? {
+                    linkActivation: cloneLinkActivationPath(candidate.linkActivationPath),
+                } : {}),
+            };
+        });
+    }
+    input.debugCollector?.recordRetrieval(debug);
+    return debug;
+}
+
+function resolveDebugTimestamp(value: Date | string | undefined): string {
+    const date = value instanceof Date ? new Date(value.getTime()) : new Date(value ?? Date.now());
+    return Number.isFinite(date.getTime()) ? date.toISOString() : new Date().toISOString();
+}
+
+function resolveDebugLimits(config: MemoryConfig, options: MemorySelectionOptions): MemoryRetrievalDebugLimits {
+    return {
+        vectorTopK: normalizeDebugLimit(options.vectorTopK, VECTOR_TOP_K),
+        keywordTopK: normalizeDebugLimit(options.keywordTopK, KEYWORD_TOP_K),
+        recentTopK: normalizeDebugLimit(options.recentTopK, RECENT_TOP_K),
+        tokenBudget: options.tokenBudget ?? options.longTermTokenBudget ?? config.longTermTokenBudget,
+        maxSelected: options.maxSelectedLongTermMemories
+            ?? options.maxSelected
+            ?? config.maxSelectedLongTermMemories
+            ?? 10,
+        maxProtectedFutureIntents: options.maxProtectedFutureIntents ?? config.maxProtectedFutureIntents ?? 3,
+        maxPerCluster: options.maxPerCluster ?? 2,
+    };
+}
+
+function normalizeDebugLimit(value: number | undefined, fallback: number): number {
+    return Math.max(0, Math.floor(value ?? fallback));
+}
+
+function cloneRetrievalDebug(debug: MemoryRetrievalDebug): MemoryRetrievalDebug {
+    return {
+        ...debug,
+        channelCounts: { ...debug.channelCounts },
+        selectedIds: [...debug.selectedIds],
+        protectedIds: [...debug.protectedIds],
+        limits: { ...debug.limits },
+        selectedMemoryIds: [...debug.selectedMemoryIds],
+        injectedMemoryIds: [...debug.injectedMemoryIds],
+        candidates: debug.candidates?.map(candidate => ({
+            ...candidate,
+            sources: [...candidate.sources],
+            featureScores: { ...candidate.featureScores },
+            ...(candidate.linkActivation ? {
+                linkActivation: cloneLinkActivationPath(candidate.linkActivation),
+            } : {}),
+        })),
+        ...(debug.linkExpansion ? {
+            linkExpansion: {
+                ...debug.linkExpansion,
+                seedMemoryIds: [...debug.linkExpansion.seedMemoryIds],
+                expandedMemoryIds: [...debug.linkExpansion.expandedMemoryIds],
+                limits: { ...debug.linkExpansion.limits },
+            },
+        } : {}),
     };
 }
 
