@@ -180,6 +180,11 @@ try {
   assert.equal(summary.memoryLinks, 32667);
   assert.equal(summary.activeMemoryLinks, plan.memoryLinks.length);
   assert.equal(summary.archiveOnlyMemoryLinks, summary.memoryLinks - summary.activeMemoryLinks);
+  if (realMode) {
+    assert.equal(summary.memoryLinks, 32667);
+    assert.equal(summary.activeMemoryLinks, 13604);
+    assert.equal(summary.archiveOnlyMemoryLinks, 19063);
+  }
   assert.equal(plan.memoryLinkAudit.brokenRef, 0);
   assert.equal(plan.memoryLinkAudit.crossCharacter, realMode ? 0 : 32667);
   assert.equal(plan.memoryLinkAudit.invalidStrength, 0);

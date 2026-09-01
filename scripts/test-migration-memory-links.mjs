@@ -10,6 +10,7 @@ try {
   const { reconcileNativeMigrationPlan } = runtime.requireModule("native/reconcile.js");
   const { dryRunFloatMigrationPackage } = runtime.requireModule("native/importer.js");
   const storageSource = await readFile(new URL("../lib/migrations/native/storage.ts", import.meta.url), "utf8");
+  const memoryStorageSource = await readFile(new URL("../lib/memory-storage.ts", import.meta.url), "utf8");
 
   const fingerprint = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   const createdAt = "2026-09-01T00:00:00.000Z";
@@ -80,10 +81,28 @@ try {
     sourceMemoryRef: "memory-c",
     source: source("futureIntents", "terminal"),
   }];
+  terminalPayload.memoryLinks.push({
+    migrationId: "link-terminal-malformed",
+    fromMemoryRef: "memory-a",
+    toMemoryRef: "memory-c",
+    source: source("memoryLinks", "terminal-malformed"),
+  });
   const terminalPlan = buildNativeMigrationPlan(manifest, terminalPayload, []);
   assert.equal(terminalPlan.memories.find((entry) => entry.metadata?.migrationId === "memory-c").futureIntent?.status, "fulfilled");
+  assert.equal(terminalPlan.memoryLinkAudit.bothEndpointsActive, 1);
+  assert.equal(terminalPlan.memoryLinkAudit.invalidStrength, 0);
+  assert.equal(terminalPlan.memoryLinkAudit.invalidType, 0);
+  assert.equal(terminalPlan.memoryLinks.length, 1);
   assert.equal(terminalPlan.memoryLinks.some((link) => link.fromMemoryId === terminalPlan.idMap.memories["memory-a"] && link.toMemoryId === terminalPlan.idMap.memories["memory-c"]), false);
   assert.equal(terminalPlan.memoryLinks.some((link) => link.fromMemoryId === terminalPlan.idMap.memories["memory-b"] && link.toMemoryId === terminalPlan.idMap.memories["memory-c"]), false);
+
+  const terminalBytes = await writeFloatMigrationPackage({
+    manifest: { ...manifest, counts: { ...manifest.counts, memoryLinks: terminalPayload.memoryLinks.length } },
+    payload: terminalPayload,
+    binaryAssets: [],
+  });
+  const terminalRun = await dryRunFloatMigrationPackage(terminalBytes, { storage: { kind: "isolated-browser", async readSnapshot() { throw new Error("snapshot should not be read"); } } });
+  assert.equal(terminalRun.ok, true, terminalRun.ok ? "" : terminalRun.errors.join("\n"));
 
   const brokenPayload = structuredClone(payload);
   brokenPayload.memoryLinks = [{
@@ -136,12 +155,14 @@ try {
   assert.equal(reconciliation.memoryLinks.reuse.length, 1);
   assert.equal(reconciliation.memoryLinks.conflicts.length, 1);
   assert.equal(reconciliation.resolvedIdMap.memoryLinks["link-emotion"], "existing-semantic");
-  assert.equal(reconciliation.resolvedIdMap.memoryLinks["link-temporal"], deterministicNativeId("memory_link", fingerprint, "link-temporal"));
+  assert.equal(Object.hasOwn(reconciliation.resolvedIdMap.memoryLinks, "link-temporal"), false);
 
   assert.match(storageSource, /saveMemoryEntries\([\s\S]*suppressMemoryLinkLifecycle:\s*true/);
   assert.match(storageSource, /saveMemoryLinks/);
   assert.match(storageSource, /loadMemoryLinks/);
-  assert.match(storageSource, /deleteMemoryLinks/);
+  assert.match(storageSource, /deleteMemoryLinks\(journal\.created\.memoryLinks\)[\s\S]*deleteMemoryEntriesWithoutLinkCleanup\(journal\.created\.memories\)/);
+  assert.doesNotMatch(storageSource, /deleteMemoryEntries\(journal\.created\.memories\)/);
+  assert.match(memoryStorageSource, /export async function deleteMemoryEntriesWithoutLinkCleanup/);
 
   console.log("migration memory link mapping tests passed");
 } finally {
