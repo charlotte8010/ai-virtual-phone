@@ -30,16 +30,16 @@ type SideEffectCounts = {
   productionMemoryWrites: number;
 };
 
-function countBy<T>(values: T[], key: (value: T) => string): Record<string, number> {
-  const output: Record<string, number> = {};
+function countBy<T>(values: T[], pick: (value: T) => string): Record<string, number> {
+  const result: Record<string, number> = {};
   for (const value of values) {
-    const item = key(value);
-    output[item] = (output[item] ?? 0) + 1;
+    const key = pick(value);
+    result[key] = (result[key] ?? 0) + 1;
   }
-  return output;
+  return result;
 }
 
-function importedSnapshotCounts(snapshot: NativeMigrationSnapshot): Record<string, number> {
+function snapshotCounts(snapshot: NativeMigrationSnapshot): Record<string, number> {
   return {
     characters: snapshot.characters.length,
     messages: snapshot.messages.length,
@@ -57,11 +57,11 @@ function importedSnapshotCounts(snapshot: NativeMigrationSnapshot): Record<strin
   };
 }
 
-function createdCount(created: Record<string, string[] | undefined>): number {
-  return Object.values(created).reduce((total, values) => total + (values?.length ?? 0), 0);
+function countCreated(created: Record<string, string[] | undefined>): number {
+  return Object.values(created).reduce((sum, values) => sum + (values?.length ?? 0), 0);
 }
 
-function importedResidualCount(snapshot: NativeMigrationSnapshot): number {
+function residualImportedRecords(snapshot: NativeMigrationSnapshot): number {
   return snapshot.characters.length
     + snapshot.contacts.length
     + snapshot.sessions.length
@@ -78,10 +78,46 @@ function importedResidualCount(snapshot: NativeMigrationSnapshot): number {
     + (snapshot.idMap ? 1 : 0);
 }
 
-function closeStorageConnection(storage: IsolatedBrowserNativeMigrationStorage): void {
-  // Validation-only close/reopen assertion. `private` is a TypeScript boundary; no production API is exposed for this test page.
+function closeForReopen(storage: IsolatedBrowserNativeMigrationStorage): void {
   const internal = storage as unknown as { db: { close(): void } };
   internal.db.close();
+}
+
+function assertRealPackage(plan: NativeMigrationPlan): void {
+  const expected: Record<string, number> = {
+    characters: 4,
+    messages: 5153,
+    assets: 79,
+    moments: 9,
+    comments: 14,
+    diary: 1,
+    worldbooks: 14,
+    activeMemories: 250,
+    archivedMemories: 147,
+    activeFutureIntents: 4,
+    archivedWindowsill: 5,
+    memoryLinks: 32667,
+    legacyCoreSummaries: 11,
+  };
+  const actual: Record<string, number> = {
+    characters: plan.characters.length,
+    messages: plan.messages.length,
+    assets: plan.media.length,
+    moments: plan.moments.length,
+    comments: plan.momentComments.length,
+    diary: plan.diaries.length,
+    worldbooks: plan.worldbooks.length,
+    activeMemories: plan.activeMemoryPalaceCount,
+    archivedMemories: plan.archive.archivedMemories.length,
+    activeFutureIntents: plan.activeFutureIntentCount,
+    archivedWindowsill: plan.archivedWindowsillCount,
+    memoryLinks: plan.archive.memoryLinks.length,
+    legacyCoreSummaries: plan.legacyCoreMemoryCount,
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    if (actual[key] !== value) throw new Error(`real package ${key}: expected ${value}, got ${actual[key]}`);
+  }
+  if (plan.timelineRecords.length !== 0) throw new Error("timeline records must stay derived");
 }
 
 function installSideEffectSpies(namespace: string): { counts: SideEffectCounts; restore(): void } {
@@ -106,32 +142,25 @@ function installSideEffectSpies(namespace: string): { counts: SideEffectCounts; 
     return originalFetch(...args);
   }) as typeof fetch;
 
-  const originalXhrOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function (...args: Parameters<XMLHttpRequest["open"]>) {
+  const originalXhrSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function (this: XMLHttpRequest, ...args: Parameters<XMLHttpRequest["send"]>): void {
     counts.externalXhrCalls += 1;
-    return originalXhrOpen.apply(this, args);
-  } as XMLHttpRequest["open"];
+    originalXhrSend.apply(this, args);
+  };
 
-  const originalOpen = indexedDB.open.bind(indexedDB);
+  const originalIndexedDbOpen = indexedDB.open.bind(indexedDB);
   indexedDB.open = ((name: string, version?: number) => {
-    if (!name.startsWith(`FloatMigrationIsolation_${namespace}`)) {
-      counts.productionIndexedDbOpens.push(name);
-    }
-    return version === undefined ? originalOpen(name) : originalOpen(name, version);
+    if (!name.startsWith(`FloatMigrationIsolation_${namespace}`)) counts.productionIndexedDbOpens.push(name);
+    return version === undefined ? originalIndexedDbOpen(name) : originalIndexedDbOpen(name, version);
   }) as typeof indexedDB.open;
 
-  const objectStorePut = IDBObjectStore.prototype.put;
-  IDBObjectStore.prototype.put = function (...args: Parameters<IDBObjectStore["put"]>) {
-    try {
-      if (this.name === "memories") {
-        const dbName = this.transaction.db.name;
-        if (dbName === "ai_phone_memory_db_v1") counts.productionMemoryWrites += 1;
-      }
-    } catch {
-      // Probe failure must never change the migration operation.
+  const originalPut = IDBObjectStore.prototype.put;
+  IDBObjectStore.prototype.put = function (this: IDBObjectStore, value: unknown, key?: IDBValidKey): IDBRequest<IDBValidKey> {
+    if (this.name === "memories" && this.transaction.db.name === "ai_phone_memory_db_v1") {
+      counts.productionMemoryWrites += 1;
     }
-    return objectStorePut.apply(this, args);
-  } as IDBObjectStore["put"];
+    return key === undefined ? originalPut.call(this, value) : originalPut.call(this, value, key);
+  };
 
   const notificationDescriptor = Object.getOwnPropertyDescriptor(window, "Notification");
   const originalNotification = window.Notification;
@@ -142,7 +171,7 @@ function installSideEffectSpies(namespace: string): { counts: SideEffectCounts; 
     } as unknown as typeof Notification;
     Object.defineProperty(window, "Notification", { configurable: true, writable: true, value: SpyNotification });
   } catch {
-    // Some browsers expose a non-configurable Notification constructor; the event/API probes still run.
+    // Browser may expose a non-configurable constructor; other probes remain active.
   }
 
   return {
@@ -151,73 +180,35 @@ function installSideEffectSpies(namespace: string): { counts: SideEffectCounts; 
       window.removeEventListener("chat-message-pushed", onChatPush);
       window.removeEventListener("chat-request-reply", onReply);
       window.fetch = originalFetch;
-      XMLHttpRequest.prototype.open = originalXhrOpen;
-      indexedDB.open = originalOpen;
-      IDBObjectStore.prototype.put = objectStorePut;
+      XMLHttpRequest.prototype.send = originalXhrSend;
+      indexedDB.open = originalIndexedDbOpen;
+      IDBObjectStore.prototype.put = originalPut;
       try {
         if (notificationDescriptor) Object.defineProperty(window, "Notification", notificationDescriptor);
         else Object.defineProperty(window, "Notification", { configurable: true, writable: true, value: originalNotification });
       } catch {
-        // Ignore restore failure in the validation page only.
+        // Validation-only cleanup.
       }
     },
   };
 }
 
-function assertRealPackage(plan: NativeMigrationPlan): void {
-  const expected = {
-    characters: 4,
-    messages: 5153,
-    assets: 79,
-    moments: 9,
-    comments: 14,
-    diary: 1,
-    worldbooks: 14,
-    activeMemories: 250,
-    archivedMemories: 147,
-    activeFutureIntents: 4,
-    archivedWindowsill: 5,
-    memoryLinks: 32667,
-    legacyCoreSummaries: 11,
-  };
-  const actual = {
-    characters: plan.characters.length,
-    messages: plan.messages.length,
-    assets: plan.media.length,
-    moments: plan.moments.length,
-    comments: plan.momentComments.length,
-    diary: plan.diaries.length,
-    worldbooks: plan.worldbooks.length,
-    activeMemories: plan.activeMemoryPalaceCount,
-    archivedMemories: plan.archive.archivedMemories.length,
-    activeFutureIntents: plan.activeFutureIntentCount,
-    archivedWindowsill: plan.archivedWindowsillCount,
-    memoryLinks: plan.archive.memoryLinks.length,
-    legacyCoreSummaries: plan.legacyCoreMemoryCount,
-  };
-  for (const [key, expectedValue] of Object.entries(expected)) {
-    if (actual[key as keyof typeof actual] !== expectedValue) {
-      throw new Error(`real package count mismatch ${key}: expected ${expectedValue}, got ${actual[key as keyof typeof actual]}`);
-    }
-  }
-  if (plan.timelineRecords.length !== 0) throw new Error("timeline records must remain derived, not imported");
-}
-
 export default function MigrationCompletionValidationPage() {
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
-  const [error, setError] = useState<string>("");
+  const [error, setError] = useState("");
   const [running, setRunning] = useState(false);
 
   async function run(): Promise<void> {
     if (!file) return;
     setRunning(true);
-    setError("");
     setResult(null);
+    setError("");
+
     const bytes = new Uint8Array(await file.arrayBuffer());
     const namespace = `real_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    let storage = new IsolatedBrowserNativeMigrationStorage(namespace);
     const conflictNamespace = `${namespace}_conflict`;
+    let storage = new IsolatedBrowserNativeMigrationStorage(namespace);
     const conflictStorage = new IsolatedBrowserNativeMigrationStorage(conflictNamespace);
 
     try {
@@ -233,19 +224,31 @@ export default function MigrationCompletionValidationPage() {
       } finally {
         spies.restore();
       }
-      if (!("journal" in first) || !first.ok) {
-        throw new Error(`first apply failed: ${"errors" in first ? first.errors.join(" | ") : JSON.stringify(first)}`);
-      }
+      if (!("journal" in first) || !first.ok) throw new Error(`first apply failed: ${JSON.stringify(first)}`);
 
-      closeStorageConnection(storage);
+      closeForReopen(storage);
       storage = new IsolatedBrowserNativeMigrationStorage(namespace);
       const firstSnapshot = await storage.readSnapshot(first.dryRun.plan);
-      const firstCounts = importedSnapshotCounts(firstSnapshot);
-      const firstRoles = countBy(firstSnapshot.messages, (message) => message.role);
+      const firstCounts = snapshotCounts(firstSnapshot);
+      const expectedFirst: Record<string, number> = {
+        characters: 4, messages: 5153, assets: 79, moments: 9, comments: 14, diary: 1, worldbooks: 14,
+        activeMemoryPalace: 250, legacyCore: 11, activeFutureIntents: 4, archivedMemories: 147,
+        archivedWindowsill: 5, memoryLinks: 32667,
+      };
+      for (const [key, value] of Object.entries(expectedFirst)) {
+        if (firstCounts[key] !== value) throw new Error(`post-write ${key}: expected ${value}, got ${firstCounts[key]}`);
+      }
+
+      const roles = countBy(firstSnapshot.messages, (message) => message.role);
+      if (roles.assistant !== 3510 || roles.user !== 1575 || roles.system !== 68) throw new Error(`role mismatch ${JSON.stringify(roles)}`);
       const richTypes = countBy(firstSnapshot.messages, (message) => message.mediaType ?? "text");
-      const planMessageById = new Map(first.dryRun.plan.messages.map((message) => [message.id, message]));
-      const timestampMismatches = firstSnapshot.messages.filter((message) => planMessageById.get(message.id)?.createdAt !== message.createdAt).length;
-      const orderMismatches = firstSnapshot.messages.filter((message) => planMessageById.get(message.id)?.order !== message.order).length;
+      if ((richTypes.text ?? 0) === 5153) throw new Error("all rich messages were flattened to text");
+
+      const plannedMessages = new Map(first.dryRun.plan.messages.map((message) => [message.id, message]));
+      const timestampMismatches = firstSnapshot.messages.filter((message) => plannedMessages.get(message.id)?.createdAt !== message.createdAt).length;
+      const orderMismatches = firstSnapshot.messages.filter((message) => plannedMessages.get(message.id)?.order !== message.order).length;
+      if (timestampMismatches || orderMismatches) throw new Error(`history mismatch timestamps=${timestampMismatches} order=${orderMismatches}`);
+
       const mediaRefs = firstSnapshot.messages.flatMap((message) => {
         const refs: string[] = [];
         if (message.mediaUrl) refs.push(message.mediaUrl);
@@ -253,59 +256,56 @@ export default function MigrationCompletionValidationPage() {
         if (layout && typeof layout.mediaRef === "string") refs.push(layout.mediaRef);
         return refs;
       });
-      const nondeterministicMediaRefs = mediaRefs.filter((ref) => !/^media-store:\/\/fm_media_[a-z0-9]+$/u.test(ref));
+      const badMediaRefs = mediaRefs.filter((ref) => !/^media-store:\/\/fm_media_[a-z0-9]+$/u.test(ref));
+      if (badMediaRefs.length) throw new Error(`non-deterministic media refs: ${badMediaRefs.slice(0, 3).join(", ")}`);
 
-      const expectedFirstCounts = { characters: 4, messages: 5153, assets: 79, moments: 9, comments: 14, diary: 1, worldbooks: 14, activeMemoryPalace: 250, legacyCore: 11, activeFutureIntents: 4, archivedMemories: 147, archivedWindowsill: 5, memoryLinks: 32667 };
-      for (const [key, expectedValue] of Object.entries(expectedFirstCounts)) {
-        if (firstCounts[key] !== expectedValue) throw new Error(`first post-write count mismatch ${key}: expected ${expectedValue}, got ${firstCounts[key]}`);
-      }
-      if (firstRoles.assistant !== 3510 || firstRoles.user !== 1575 || firstRoles.system !== 68) throw new Error(`role distribution mismatch: ${JSON.stringify(firstRoles)}`);
-      if ((richTypes.text ?? 0) === 5153) throw new Error("rich messages were flattened to text");
-      if (timestampMismatches || orderMismatches) throw new Error(`historical ordering mismatch timestamps=${timestampMismatches} order=${orderMismatches}`);
-      if (nondeterministicMediaRefs.length) throw new Error(`non-deterministic media refs: ${nondeterministicMediaRefs.slice(0, 3).join(", ")}`);
-      if (spies.counts.liveChatPushEvents !== 0) throw new Error(`pushChatMessage/live chat events fired ${spies.counts.liveChatPushEvents} times`);
-      if (spies.counts.autonomousReplyEvents !== 0) throw new Error(`autonomous reply events fired ${spies.counts.autonomousReplyEvents} times`);
+      if (spies.counts.liveChatPushEvents !== 0) throw new Error(`live chat path fired ${spies.counts.liveChatPushEvents} times`);
+      if (spies.counts.autonomousReplyEvents !== 0) throw new Error(`autonomous reply fired ${spies.counts.autonomousReplyEvents} times`);
       if (spies.counts.notificationCalls !== 0) throw new Error(`notifications fired ${spies.counts.notificationCalls} times`);
       if (spies.counts.externalFetchCalls !== 0 || spies.counts.externalXhrCalls !== 0) throw new Error(`external API activity fetch=${spies.counts.externalFetchCalls} xhr=${spies.counts.externalXhrCalls}`);
-      if (spies.counts.productionIndexedDbOpens.length !== 0) throw new Error(`production IndexedDB opened during isolated apply: ${spies.counts.productionIndexedDbOpens.join(", ")}`);
-      if (spies.counts.productionMemoryWrites !== 0) throw new Error(`production memory writes observed: ${spies.counts.productionMemoryWrites}`);
+      if (spies.counts.productionIndexedDbOpens.length) throw new Error(`production IndexedDB opened: ${spies.counts.productionIndexedDbOpens.join(", ")}`);
+      if (spies.counts.productionMemoryWrites !== 0) throw new Error(`production memory writes=${spies.counts.productionMemoryWrites}`);
 
-      const beforeSecond = importedSnapshotCounts(firstSnapshot);
+      const beforeSecond = firstCounts;
       const second = await applyFloatMigrationPackage(bytes, { storage });
       if (!("journal" in second) || !second.ok) throw new Error(`second apply failed: ${JSON.stringify(second)}`);
-      closeStorageConnection(storage);
+      closeForReopen(storage);
       storage = new IsolatedBrowserNativeMigrationStorage(namespace);
       const secondSnapshot = await storage.readSnapshot(second.dryRun.plan);
-      const secondCounts = importedSnapshotCounts(secondSnapshot);
+      const secondCounts = snapshotCounts(secondSnapshot);
       const duplicateDelta = Object.fromEntries(Object.keys(beforeSecond).map((key) => [key, secondCounts[key] - beforeSecond[key]]));
-      if (Object.values(duplicateDelta).some((value) => value !== 0)) throw new Error(`duplicate delta is not zero: ${JSON.stringify(duplicateDelta)}`);
-      if (second.expectedVsActual.actualCreates !== 0 || second.dryRun.reconciliation.totals.create !== 0) throw new Error(`second apply unexpectedly created records: ${JSON.stringify(second.expectedVsActual)}`);
+      if (Object.values(duplicateDelta).some((value) => value !== 0)) throw new Error(`duplicate delta ${JSON.stringify(duplicateDelta)}`);
+      if (second.dryRun.reconciliation.totals.create !== 0 || second.expectedVsActual.actualCreates !== 0) {
+        throw new Error(`second apply created records ${JSON.stringify(second.expectedVsActual)}`);
+      }
 
-      const conflictDry = await dryRunFloatMigrationPackage(bytes, { storage: conflictStorage });
-      if (!conflictDry.ok) throw new Error(`conflict setup dry-run failed: ${conflictDry.errors.join(" | ")}`);
-      const targetCharacter = conflictDry.dryRun.plan.characters[0].value;
-      const conflictingCharacter = { ...targetCharacter, name: `${targetCharacter.name} [preexisting Float edit]` };
+      const conflictSetup = await dryRunFloatMigrationPackage(bytes, { storage: conflictStorage });
+      if (!conflictSetup.ok) throw new Error(`conflict setup failed: ${conflictSetup.errors.join(" | ")}`);
+      const target = conflictSetup.dryRun.plan.characters[0].value;
+      const conflictingCharacter = { ...target, name: `${target.name} [preexisting edit]` };
       await conflictStorage.seedForIntegration({ characters: [conflictingCharacter] });
-      const conflictCheck = await dryRunFloatMigrationPackage(bytes, { storage: conflictStorage });
-      if (!conflictCheck.ok) throw new Error(`conflict dry-run failed: ${conflictCheck.errors.join(" | ")}`);
-      if (conflictCheck.dryRun.reconciliation.characters.conflicts.length !== 1) throw new Error(`expected one character conflict, observed ${conflictCheck.dryRun.reconciliation.characters.conflicts.length}`);
-      const conflictSnapshot = await conflictStorage.readSnapshot(conflictCheck.dryRun.plan);
-      if (conflictSnapshot.characters.find((entry) => entry.id === conflictingCharacter.id)?.name !== conflictingCharacter.name) throw new Error("conflict test overwrote pre-existing Float record");
+      const conflict = await dryRunFloatMigrationPackage(bytes, { storage: conflictStorage });
+      if (!conflict.ok) throw new Error(`conflict test failed: ${conflict.errors.join(" | ")}`);
+      if (conflict.dryRun.reconciliation.characters.conflicts.length !== 1) throw new Error("expected one stable-id character conflict");
+      const conflictSnapshot = await conflictStorage.readSnapshot(conflict.dryRun.plan);
+      if (conflictSnapshot.characters.find((entry) => entry.id === target.id)?.name !== conflictingCharacter.name) {
+        throw new Error("conflict test overwrote pre-existing record");
+      }
 
       const rollback = await rollbackFloatMigrationRun(first.journal.runId, storage);
-      if (!rollback.ok || rollback.journal?.status !== "rolled_back") throw new Error(`rollback failed: ${JSON.stringify(rollback)}`);
-      closeStorageConnection(storage);
+      if (!rollback.ok || rollback.journal?.status !== "rolled_back") throw new Error(`rollback failed ${JSON.stringify(rollback)}`);
+      closeForReopen(storage);
       storage = new IsolatedBrowserNativeMigrationStorage(namespace);
       const rollbackSnapshot = await storage.readSnapshot(first.dryRun.plan);
       const rolledJournal = await storage.readJournal(first.journal.runId);
       const baselinePreserved = rollbackSnapshot.identities.some((entry) => entry.id === BASELINE_IDENTITY.id);
-      const residualImportedRecords = importedResidualCount(rollbackSnapshot);
-      if (!baselinePreserved) throw new Error("rollback deleted pre-existing Float identity");
-      if (residualImportedRecords !== 0) throw new Error(`rollback left ${residualImportedRecords} imported native/archive records`);
-      if (rolledJournal?.status !== "rolled_back") throw new Error(`journal status after reopen is ${rolledJournal?.status ?? "missing"}`);
+      const residual = residualImportedRecords(rollbackSnapshot);
+      if (!baselinePreserved) throw new Error("rollback removed pre-existing Float identity");
+      if (residual !== 0) throw new Error(`rollback residual imported records=${residual}`);
+      if (rolledJournal?.status !== "rolled_back") throw new Error(`journal after reopen=${rolledJournal?.status ?? "missing"}`);
 
-      const firstActualCreate = createdCount(first.journal.created as Record<string, string[] | undefined>);
-      const secondActualCreate = createdCount(second.journal.created as Record<string, string[] | undefined>);
+      const firstActualCreate = countCreated(first.journal.created as Record<string, string[] | undefined>);
+      const secondActualCreate = countCreated(second.journal.created as Record<string, string[] | undefined>);
       setResult({
         namespace,
         databaseName: storage.databaseName,
@@ -322,18 +322,18 @@ export default function MigrationCompletionValidationPage() {
         },
         firstPostWriteReread: {
           counts: firstCounts,
-          roles: firstRoles,
+          roles,
           richTypes,
           mediaRefCount: mediaRefs.length,
-          nondeterministicMediaRefs: nondeterministicMediaRefs.length,
+          nondeterministicMediaRefs: badMediaRefs.length,
           timestampMismatches,
           orderMismatches,
           timelineRecords: first.dryRun.plan.timelineRecords.length,
         },
         sideEffects: {
           cognitiveExtractionCalls: spies.counts.productionMemoryWrites,
-          futureIntentDetectorCalls: spies.counts.liveChatPushEvents,
-          pushChatMessageCalls: spies.counts.liveChatPushEvents,
+          futureIntentDetectorLivePathCalls: spies.counts.liveChatPushEvents,
+          pushChatMessageLivePathCalls: spies.counts.liveChatPushEvents,
           autonomousReplyCalls: spies.counts.autonomousReplyEvents,
           notificationCalls: spies.counts.notificationCalls,
           externalApiCalls: spies.counts.externalFetchCalls + spies.counts.externalXhrCalls,
@@ -352,17 +352,17 @@ export default function MigrationCompletionValidationPage() {
           postReconciliation: second.expectedVsActual,
         },
         conflict: {
-          conflicts: conflictCheck.dryRun.reconciliation.characters.conflicts.length,
+          conflicts: conflict.dryRun.reconciliation.characters.conflicts.length,
           originalPreserved: true,
-          preexistingId: conflictingCharacter.id,
+          preexistingId: target.id,
         },
         rollback: {
           ok: rollback.ok,
           journalStatus: rolledJournal?.status,
           baselineIdentityPreserved: baselinePreserved,
           removed: firstActualCreate,
-          residualImportedRecords,
-          remainingSnapshot: importedSnapshotCounts(rollbackSnapshot),
+          residualImportedRecords: residual,
+          remainingSnapshot: snapshotCounts(rollbackSnapshot),
         },
       });
     } catch (cause) {
@@ -377,7 +377,7 @@ export default function MigrationCompletionValidationPage() {
   return (
     <main style={{ padding: 24, fontFamily: "monospace", maxWidth: 1100, margin: "0 auto" }}>
       <h1>Migration Completion Validation</h1>
-      <p>Client-only test harness. The selected package is never uploaded.</p>
+      <p>Client-only isolated IndexedDB harness. The selected package is never uploaded.</p>
       <input id="migration-package" type="file" accept=".zip,.float-migration.zip" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
       <button id="run-validation" type="button" disabled={!file || running} onClick={() => void run()} style={{ marginLeft: 12 }}>
         {running ? "Running…" : "Run isolated validation"}
