@@ -104,6 +104,28 @@ export async function loadMemoryEntriesByType(
     return entries.filter(entry => entry.type === type);
 }
 
+/** Persist lifecycle changes, including old/new replacement pairs, atomically. */
+export async function saveMemoryEntries(entries: MemoryEntry[]): Promise<void> {
+    if (entries.length === 0) return;
+    const db = await openDb();
+    if (!db) {
+        if (hasBrowserApi()) throw new Error("Memory database is unavailable");
+        return;
+    }
+    try {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        for (const entry of entries) store.put(entry);
+        await new Promise<void>((resolve, reject) => {
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error ?? new Error("Memory batch write failed"));
+            tx.onabort = () => reject(tx.error ?? new Error("Memory batch write aborted"));
+        });
+    } finally {
+        db.close();
+    }
+}
+
 /** Update selected long-term memories atomically after they were injected into a prompt. */
 export async function updateMemoryRecallStats(
     characterId: string,
@@ -256,8 +278,20 @@ function incrementEventCounterNow(characterId: string, event: FutureIntentEvent)
     if (typeof window !== "undefined") {
         kvSet(EVENT_COUNTER_PREFIX + characterId, String(next));
         void (async () => {
-            const { maybeRunFutureIntentDetection } = await import("./future-intent-detector");
-            await maybeRunFutureIntentDetection(characterId, event);
+            let lifecycleResult: { status?: string } | undefined;
+            try {
+                const { maybeRunFutureIntentLifecycle } = await import("./future-intent-lifecycle");
+                lifecycleResult = await maybeRunFutureIntentLifecycle(characterId, event);
+            } catch (error) {
+                console.warn("[FutureIntentLifecycle] Event evaluation failed; continuing with creation detection", error);
+            }
+            if (lifecycleResult?.status === "replaced") return;
+            try {
+                const { maybeRunFutureIntentDetection } = await import("./future-intent-detector");
+                await maybeRunFutureIntentDetection(characterId, event);
+            } catch (error) {
+                console.warn("[FutureIntent] Immediate detection failed:", error);
+            }
         })()
             .catch(error => console.warn("[FutureIntent] Immediate detection failed:", error));
     }
