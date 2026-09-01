@@ -20,6 +20,14 @@ const BASELINE_IDENTITY: UserIdentity = {
   customSettings: "",
 };
 
+type ValidationStageStatus = "running" | "completed" | "failed" | "timed_out";
+
+type ValidationStageEntry = {
+  stage: string;
+  status: ValidationStageStatus;
+  elapsedMs: number;
+};
+
 type SideEffectCounts = {
   liveChatPushEvents: number;
   autonomousReplyEvents: number;
@@ -198,43 +206,94 @@ export default function MigrationCompletionValidationPage() {
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState("");
   const [running, setRunning] = useState(false);
-  const [stage, setStage] = useState("idle");
+  const [currentStage, setCurrentStage] = useState<string | null>(null);
+  const [lastCompletedStage, setLastCompletedStage] = useState<string | null>(null);
+  const [stageEntries, setStageEntries] = useState<ValidationStageEntry[]>([]);
+
+  async function runStage<T>(stage: string, timeoutMs: number, action: () => Promise<T>): Promise<T> {
+    const startedAt = performance.now();
+    let timedOut = false;
+    setCurrentStage(stage);
+    setStageEntries((entries) => [...entries, { stage, status: "running", elapsedMs: 0 }]);
+
+    const update = (status: ValidationStageStatus) => {
+      const elapsedMs = Math.round(performance.now() - startedAt);
+      setStageEntries((entries) => entries.map((entry, index) =>
+        index === entries.length - 1 ? { stage, status, elapsedMs } : entry
+      ));
+      return elapsedMs;
+    };
+
+    const intervalId = window.setInterval(() => update("running"), 1000);
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      const elapsedMs = update("timed_out");
+      setError(`validation timeout at stage "${stage}" after ${elapsedMs}ms; last completed stage: ${lastCompletedStage ?? "none"}`);
+    }, timeoutMs);
+
+    try {
+      const value = await action();
+      if (timedOut) {
+        throw new Error(`validation timeout at stage "${stage}"; last completed stage: ${lastCompletedStage ?? "none"}`);
+      }
+      update("completed");
+      setLastCompletedStage(stage);
+      return value;
+    } catch (cause) {
+      if (!timedOut) update("failed");
+      throw cause;
+    } finally {
+      window.clearInterval(intervalId);
+      window.clearTimeout(timeoutId);
+    }
+  }
 
   async function run(): Promise<void> {
     if (!file) return;
     setRunning(true);
     setResult(null);
     setError("");
-    setStage("reading-package");
+    setCurrentStage(null);
+    setLastCompletedStage(null);
+    setStageEntries([]);
 
-    const bytes = new Uint8Array(await file.arrayBuffer());
     const namespace = `real_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const conflictNamespace = `${namespace}_conflict`;
     let storage = new IsolatedBrowserNativeMigrationStorage(namespace);
     const conflictStorage = new IsolatedBrowserNativeMigrationStorage(conflictNamespace);
 
     try {
-      setStage("seed-baseline");
-      await storage.seedForIntegration({ identities: [BASELINE_IDENTITY] });
-      setStage("dry-run");
-      const dry = await dryRunFloatMigrationPackage(bytes, { storage });
-      if (!dry.ok) throw new Error(`dry-run failed: ${dry.errors.join(" | ")}`);
-      assertRealPackage(dry.dryRun.plan);
+      const bytes = await runStage("read package", 120_000, async () =>
+        new Uint8Array(await file.arrayBuffer())
+      );
 
-      setStage("first-apply");
+      const dry = await runStage("dry-run", 300_000, async () => {
+        await storage.seedForIntegration({ identities: [BASELINE_IDENTITY] });
+        const value = await dryRunFloatMigrationPackage(bytes, { storage });
+        if (!value.ok) throw new Error(`dry-run failed: ${value.errors.join(" | ")}`);
+        assertRealPackage(value.dryRun.plan);
+        return value;
+      });
+
       const spies = installSideEffectSpies(namespace);
-      let first;
-      try {
-        first = await applyFloatMigrationPackage(bytes, { storage });
-      } finally {
-        spies.restore();
-      }
-      if (!("journal" in first) || !first.ok) throw new Error(`first apply failed: ${JSON.stringify(first)}`);
+      const first = await runStage("first apply", 600_000, async () => {
+        try {
+          const value = await applyFloatMigrationPackage(bytes, { storage });
+          if (!("journal" in value) || !value.ok) throw new Error(`first apply failed: ${JSON.stringify(value)}`);
+          return value;
+        } finally {
+          spies.restore();
+        }
+      });
 
-      setStage("first-reopen-reread");
-      closeForReopen(storage);
-      storage = new IsolatedBrowserNativeMigrationStorage(namespace);
-      const firstSnapshot = await storage.readSnapshot(first.dryRun.plan);
+      await runStage("close/reopen", 30_000, async () => {
+        closeForReopen(storage);
+        storage = new IsolatedBrowserNativeMigrationStorage(namespace);
+      });
+
+      const firstSnapshot = await runStage("first reread", 180_000, async () =>
+        storage.readSnapshot(first.dryRun.plan)
+      );
       const firstCounts = snapshotCounts(firstSnapshot);
       const expectedFirst: Record<string, number> = {
         characters: 4, messages: 5153, assets: 79, moments: 9, comments: 14, diary: 1, worldbooks: 14,
@@ -272,13 +331,18 @@ export default function MigrationCompletionValidationPage() {
       if (spies.counts.productionIndexedDbOpens.length) throw new Error(`production IndexedDB opened: ${spies.counts.productionIndexedDbOpens.join(", ")}`);
       if (spies.counts.productionMemoryWrites !== 0) throw new Error(`production memory writes=${spies.counts.productionMemoryWrites}`);
 
-      setStage("second-apply");
       const beforeSecond = firstCounts;
-      const second = await applyFloatMigrationPackage(bytes, { storage });
-      if (!("journal" in second) || !second.ok) throw new Error(`second apply failed: ${JSON.stringify(second)}`);
-      closeForReopen(storage);
-      storage = new IsolatedBrowserNativeMigrationStorage(namespace);
-      const secondSnapshot = await storage.readSnapshot(second.dryRun.plan);
+      const second = await runStage("second apply", 600_000, async () => {
+        const value = await applyFloatMigrationPackage(bytes, { storage });
+        if (!("journal" in value) || !value.ok) throw new Error(`second apply failed: ${JSON.stringify(value)}`);
+        return value;
+      });
+
+      const secondSnapshot = await runStage("second reread", 180_000, async () => {
+        closeForReopen(storage);
+        storage = new IsolatedBrowserNativeMigrationStorage(namespace);
+        return storage.readSnapshot(second.dryRun.plan);
+      });
       const secondCounts = snapshotCounts(secondSnapshot);
       const duplicateDelta = Object.fromEntries(Object.keys(beforeSecond).map((key) => [key, secondCounts[key] - beforeSecond[key]]));
       if (Object.values(duplicateDelta).some((value) => value !== 0)) throw new Error(`duplicate delta ${JSON.stringify(duplicateDelta)}`);
@@ -286,36 +350,46 @@ export default function MigrationCompletionValidationPage() {
         throw new Error(`second apply created records ${JSON.stringify(second.expectedVsActual)}`);
       }
 
-      setStage("conflict-validation");
-      const conflictSetup = await dryRunFloatMigrationPackage(bytes, { storage: conflictStorage });
-      if (!conflictSetup.ok) throw new Error(`conflict setup failed: ${conflictSetup.errors.join(" | ")}`);
-      const target = conflictSetup.dryRun.plan.characters[0].value;
-      const conflictingCharacter = { ...target, name: `${target.name} [preexisting edit]` };
-      await conflictStorage.seedForIntegration({ characters: [conflictingCharacter] });
-      const conflict = await dryRunFloatMigrationPackage(bytes, { storage: conflictStorage });
-      if (!conflict.ok) throw new Error(`conflict test failed: ${conflict.errors.join(" | ")}`);
-      if (conflict.dryRun.reconciliation.characters.conflicts.length !== 1) throw new Error("expected one stable-id character conflict");
-      const conflictSnapshot = await conflictStorage.readSnapshot(conflict.dryRun.plan);
-      if (conflictSnapshot.characters.find((entry) => entry.id === target.id)?.name !== conflictingCharacter.name) {
-        throw new Error("conflict test overwrote pre-existing record");
-      }
+      const conflict = await runStage("conflict", 300_000, async () => {
+        const setup = await dryRunFloatMigrationPackage(bytes, { storage: conflictStorage });
+        if (!setup.ok) throw new Error(`conflict setup failed: ${setup.errors.join(" | ")}`);
+        const target = setup.dryRun.plan.characters[0].value;
+        const conflictingCharacter = { ...target, name: `${target.name} [preexisting edit]` };
+        await conflictStorage.seedForIntegration({ characters: [conflictingCharacter] });
+        const value = await dryRunFloatMigrationPackage(bytes, { storage: conflictStorage });
+        if (!value.ok) throw new Error(`conflict test failed: ${value.errors.join(" | ")}`);
+        if (value.dryRun.reconciliation.characters.conflicts.length !== 1) throw new Error("expected one stable-id character conflict");
+        const snapshot = await conflictStorage.readSnapshot(value.dryRun.plan);
+        if (snapshot.characters.find((entry) => entry.id === target.id)?.name !== conflictingCharacter.name) {
+          throw new Error("conflict test overwrote pre-existing record");
+        }
+        return { value, target };
+      });
 
-      setStage("rollback");
-      const rollback = await rollbackFloatMigrationRun(first.journal.runId, storage);
-      if (!rollback.ok || rollback.journal?.status !== "rolled_back") throw new Error(`rollback failed ${JSON.stringify(rollback)}`);
-      closeForReopen(storage);
-      storage = new IsolatedBrowserNativeMigrationStorage(namespace);
-      const rollbackSnapshot = await storage.readSnapshot(first.dryRun.plan);
-      const rolledJournal = await storage.readJournal(first.journal.runId);
-      const baselinePreserved = rollbackSnapshot.identities.some((entry) => entry.id === BASELINE_IDENTITY.id);
-      const residual = residualImportedRecords(rollbackSnapshot);
-      if (!baselinePreserved) throw new Error("rollback removed pre-existing Float identity");
-      if (residual !== 0) throw new Error(`rollback residual imported records=${residual}`);
-      if (rolledJournal?.status !== "rolled_back") throw new Error(`journal after reopen=${rolledJournal?.status ?? "missing"}`);
+      const rollback = await runStage("rollback", 300_000, async () => {
+        const value = await rollbackFloatMigrationRun(first.journal.runId, storage);
+        if (!value.ok || value.journal?.status !== "rolled_back") throw new Error(`rollback failed ${JSON.stringify(value)}`);
+        return value;
+      });
+
+      await runStage("reopen", 30_000, async () => {
+        closeForReopen(storage);
+        storage = new IsolatedBrowserNativeMigrationStorage(namespace);
+      });
+
+      const final = await runStage("final reread", 180_000, async () => {
+        const snapshot = await storage.readSnapshot(first.dryRun.plan);
+        const journal = await storage.readJournal(first.journal.runId);
+        const baselinePreserved = snapshot.identities.some((entry) => entry.id === BASELINE_IDENTITY.id);
+        const residual = residualImportedRecords(snapshot);
+        if (!baselinePreserved) throw new Error("rollback removed pre-existing Float identity");
+        if (residual !== 0) throw new Error(`rollback residual imported records=${residual}`);
+        if (journal?.status !== "rolled_back") throw new Error(`journal after reopen=${journal?.status ?? "missing"}`);
+        return { snapshot, journal, baselinePreserved, residual };
+      });
 
       const firstActualCreate = countCreated(first.journal.created as Record<string, string[] | undefined>);
       const secondActualCreate = countCreated(second.journal.created as Record<string, string[] | undefined>);
-      setStage("complete");
       setResult({
         namespace,
         databaseName: storage.databaseName,
@@ -331,13 +405,8 @@ export default function MigrationCompletionValidationPage() {
           postReconciliation: first.expectedVsActual,
         },
         firstPostWriteReread: {
-          counts: firstCounts,
-          roles,
-          richTypes,
-          mediaRefCount: mediaRefs.length,
-          nondeterministicMediaRefs: badMediaRefs.length,
-          timestampMismatches,
-          orderMismatches,
+          counts: firstCounts, roles, richTypes, mediaRefCount: mediaRefs.length,
+          nondeterministicMediaRefs: badMediaRefs.length, timestampMismatches, orderMismatches,
           timelineRecords: first.dryRun.plan.timelineRecords.length,
         },
         sideEffects: {
@@ -362,27 +431,25 @@ export default function MigrationCompletionValidationPage() {
           postReconciliation: second.expectedVsActual,
         },
         conflict: {
-          conflicts: conflict.dryRun.reconciliation.characters.conflicts.length,
+          conflicts: conflict.value.dryRun.reconciliation.characters.conflicts.length,
           originalPreserved: true,
-          preexistingId: target.id,
+          preexistingId: conflict.target.id,
         },
         rollback: {
           ok: rollback.ok,
-          journalStatus: rolledJournal?.status,
-          baselineIdentityPreserved: baselinePreserved,
+          journalStatus: final.journal?.status,
+          baselineIdentityPreserved: final.baselinePreserved,
           removed: firstActualCreate,
-          residualImportedRecords: residual,
-          remainingSnapshot: snapshotCounts(rollbackSnapshot),
+          residualImportedRecords: final.residual,
+          remainingSnapshot: snapshotCounts(final.snapshot),
         },
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.stack || cause.message : String(cause));
+      setError((existing) => existing || (cause instanceof Error ? cause.stack || cause.message : String(cause)));
     } finally {
-      setStage("cleanup");
-      await storage.dispose?.();
-      await conflictStorage.dispose?.();
       setRunning(false);
-      setStage((current) => current === "cleanup" ? "finished" : current);
+      setCurrentStage(null);
+      void Promise.allSettled([storage.dispose?.(), conflictStorage.dispose?.()]);
     }
   }
 
@@ -390,7 +457,8 @@ export default function MigrationCompletionValidationPage() {
     <main style={{ padding: 24, fontFamily: "monospace", maxWidth: 1100, margin: "0 auto" }}>
       <h1>Migration Completion Validation</h1>
       <p>Client-only isolated IndexedDB harness. The selected package is never uploaded.</p>
-      <p id="validation-stage">Stage: {stage}</p>
+      <p id="validation-stage">Last completed: {lastCompletedStage ?? "none"} · Current: {currentStage ?? "none"}</p>
+      <pre id="validation-stage-timings" style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(stageEntries, null, 2)}</pre>
       <input id="migration-package" type="file" accept=".zip,.float-migration.zip" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
       <button id="run-validation" type="button" disabled={!file || running} onClick={() => void run()} style={{ marginLeft: 12 }}>
         {running ? "Running…" : "Run isolated validation"}
