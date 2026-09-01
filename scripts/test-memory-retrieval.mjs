@@ -143,6 +143,7 @@ const result = await serviceModule.namespace.selectMemoriesForPrompt("char-1", "
 });
 
 assert.ok(result.selected.some(entry => entry.id === "due-today"));
+assert.ok(result.selected.some(entry => entry.id === "overdue"));
 assert.ok(result.selected.some(entry => entry.id === "recent"));
 assert.equal(result.debug.channelCounts.vector, 0);
 assert.equal(result.debug.channelCounts.keyword, 0);
