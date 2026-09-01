@@ -233,9 +233,9 @@ for (const badContent of ["", "plain text instead of JSON", "{\"memories\":[]}",
     assert.equal(badResult.success, false, `malformed/empty output must reject: ${badContent}`);
 }
 
-const latestSnapshot = await compaction.namespace.loadLatestCoreCompactionSnapshot("char-1");
+const latestSnapshot = await compaction.namespace.loadLatestCoreMemoryCompactionSnapshot("char-1");
 assert.equal(latestSnapshot.characterId, "char-1");
-assert.equal(await compaction.namespace.loadLatestCoreCompactionSnapshot("char-2"), null);
+assert.equal(await compaction.namespace.loadLatestCoreMemoryCompactionSnapshot("char-2"), null);
 const restored = await compaction.namespace.restoreCoreMemoryCompaction("char-1", "run-char-1");
 assert.equal(restored.success, true);
 assert.deepEqual(
@@ -244,7 +244,7 @@ assert.deepEqual(
     "Restore exactly recovers the original Core records",
 );
 assert.deepEqual(context.__cores.filter(entry => entry.characterId === "char-2"), beforeFailedApply.filter(entry => entry.characterId === "char-2"));
-assert.equal(await compaction.namespace.loadLatestCoreCompactionSnapshot("char-1"), null, "restored snapshot is no longer offered as active");
+assert.equal(await compaction.namespace.loadLatestCoreMemoryCompactionSnapshot("char-1"), null, "restored snapshot is no longer offered as active");
 
 const uiSource = await readFile(resolve(repoRoot, "components/memory/memory-bank-page.tsx"), "utf8");
 assert.match(uiSource, /预览整理/);

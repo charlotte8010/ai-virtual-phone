@@ -1,7 +1,7 @@
 // lib/memory-storage.ts
 // IndexedDB persistence for long-term memory entries + short-term events + localStorage config.
 
-import type { MemoryEntry, MemoryConfig, MemoryLink } from "./memory-types";
+import type { CoreCompactionSnapshot, MemoryEntry, MemoryConfig, MemoryLink } from "./memory-types";
 import { DEFAULT_MEMORY_CONFIG } from "./memory-types";
 import { kvGet, kvSet, registerKvMigration, registerDynamicPrefix } from "./kv-db";
 import { openIndexedDbAtLeast } from "./idb-open";
@@ -13,15 +13,22 @@ import { dbWaitForMessagePersistence } from "./chat-db";
 // ── Long-term memory DB (unchanged from v1) ──
 
 const DB_NAME = "ai_phone_memory_db_v1";
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const STORE_NAME = "memories";
 const LINK_STORE_NAME = "memory_links";
+const CORE_COMPACTION_SNAPSHOT_STORE_NAME = "core_compaction_snapshots";
 
 const CONFIG_KEY = "ai_phone_memory_config_v1";
 
 export interface MemoryPersistenceOptions {
     /** Skip all post-save Cognitive Memory link work for imports/restores. */
     suppressMemoryLinkLifecycle?: boolean;
+}
+
+export interface CoreMemoryReplacementRequest {
+    snapshot: CoreCompactionSnapshot;
+    originalEntries: MemoryEntry[];
+    newEntries: MemoryEntry[];
 }
 
 function hasBrowserApi(): boolean {
@@ -55,27 +62,55 @@ function ensureMemoryLinkIndexes(store: IDBObjectStore): void {
     }
 }
 
+function ensureCoreCompactionSnapshotIndexes(store: IDBObjectStore): void {
+    if (!store.indexNames.contains("by_character")) {
+        store.createIndex("by_character", "characterId", { unique: false });
+    }
+    if (!store.indexNames.contains("by_character_compacted_at")) {
+        store.createIndex("by_character_compacted_at", ["characterId", "compactedAt"], { unique: false });
+    }
+}
+
+function upgradeMemorySchema(db: IDBDatabase, tx: IDBTransaction | null): void {
+    let store: IDBObjectStore;
+    if (!db.objectStoreNames.contains(STORE_NAME)) {
+        store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
+    } else {
+        store = tx!.objectStore(STORE_NAME);
+    }
+    ensureMemoryIndexes(store);
+
+    let linkStore: IDBObjectStore;
+    if (!db.objectStoreNames.contains(LINK_STORE_NAME)) {
+        linkStore = db.createObjectStore(LINK_STORE_NAME, { keyPath: "id" });
+    } else {
+        linkStore = tx!.objectStore(LINK_STORE_NAME);
+    }
+    ensureMemoryLinkIndexes(linkStore);
+
+    let snapshotStore: IDBObjectStore;
+    if (!db.objectStoreNames.contains(CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
+        snapshotStore = db.createObjectStore(CORE_COMPACTION_SNAPSHOT_STORE_NAME, { keyPath: "runId" });
+    } else {
+        snapshotStore = tx!.objectStore(CORE_COMPACTION_SNAPSHOT_STORE_NAME);
+    }
+    ensureCoreCompactionSnapshotIndexes(snapshotStore);
+}
+
 async function openDb(): Promise<IDBDatabase | null> {
     if (!hasBrowserApi()) return null;
     // Open at >= DB_VERSION: a backup restore may have bumped the stored version
     // higher, and opening at a fixed lower version would throw a VersionError.
-    return openIndexedDbAtLeast(DB_NAME, DB_VERSION, (db, _oldVersion, tx) => {
-        let store: IDBObjectStore;
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-            store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
-        } else {
-            store = tx!.objectStore(STORE_NAME);
-        }
-        ensureMemoryIndexes(store);
-
-        let linkStore: IDBObjectStore;
-        if (!db.objectStoreNames.contains(LINK_STORE_NAME)) {
-            linkStore = db.createObjectStore(LINK_STORE_NAME, { keyPath: "id" });
-        } else {
-            linkStore = tx!.objectStore(LINK_STORE_NAME);
-        }
-        ensureMemoryLinkIndexes(linkStore);
-    }).catch(() => null);
+    let db = await openIndexedDbAtLeast(DB_NAME, DB_VERSION, upgradeMemorySchema).catch(() => null);
+    // Data restore can leave the database at a version above this module's
+    // constant. If that restored schema predates the snapshot store, perform
+    // one additional upgrade so Apply/Restore can remain one transaction.
+    if (db && !db.objectStoreNames.contains(CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
+        const nextVersion = db.version + 1;
+        db.close();
+        db = await openIndexedDbAtLeast(DB_NAME, nextVersion, upgradeMemorySchema).catch(() => null);
+    }
+    return db;
 }
 
 function runRequest<T>(req: IDBRequest<T>): Promise<T> {
@@ -165,6 +200,115 @@ export async function loadMemoryEntriesByType(
 ): Promise<MemoryEntry[]> {
     const entries = await loadMemoryEntries(characterId);
     return entries.filter(entry => entry.type === type);
+}
+
+/** Replace one character's Core set and persist its exact rollback snapshot atomically. */
+export async function replaceCoreMemoriesWithSnapshot(
+    request: CoreMemoryReplacementRequest,
+): Promise<void> {
+    if (request.originalEntries.length === 0 || request.newEntries.length === 0) {
+        throw new Error("核心记忆整理需要同时存在原始记录和候选记录");
+    }
+    const db = await openDb();
+    if (!db) {
+        if (hasBrowserApi()) throw new Error("记忆数据库不可用");
+        return;
+    }
+    try {
+        if (!db.objectStoreNames.contains(CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
+            throw new Error("核心记忆整理快照仓库不可用");
+        }
+        const tx = db.transaction([STORE_NAME, CORE_COMPACTION_SNAPSHOT_STORE_NAME], "readwrite");
+        const memoryStore = tx.objectStore(STORE_NAME);
+        const snapshotStore = tx.objectStore(CORE_COMPACTION_SNAPSHOT_STORE_NAME);
+        for (const entry of request.originalEntries) memoryStore.delete(entry.id);
+        // add(), rather than put(), makes an unexpected deterministic ID
+        // collision abort this transaction without overwriting existing data.
+        for (const entry of request.newEntries) memoryStore.add(entry);
+        snapshotStore.add(request.snapshot);
+        await transactionDone(tx);
+    } finally {
+        db.close();
+    }
+}
+
+async function loadCoreCompactionSnapshotByRunId(runId: string): Promise<CoreCompactionSnapshot | null> {
+    const db = await openDb();
+    if (!db || !db.objectStoreNames.contains(CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
+        db?.close();
+        return null;
+    }
+    try {
+        const tx = db.transaction(CORE_COMPACTION_SNAPSHOT_STORE_NAME, "readonly");
+        return await runRequest(tx.objectStore(CORE_COMPACTION_SNAPSHOT_STORE_NAME).get(runId)) ?? null;
+    } finally {
+        db.close();
+    }
+}
+
+export async function loadLatestCoreCompactionSnapshot(
+    characterId: string,
+): Promise<CoreCompactionSnapshot | null> {
+    const db = await openDb();
+    if (!db || !db.objectStoreNames.contains(CORE_COMPACTION_SNAPSHOT_STORE_NAME)) {
+        db?.close();
+        return null;
+    }
+    try {
+        const tx = db.transaction(CORE_COMPACTION_SNAPSHOT_STORE_NAME, "readonly");
+        let snapshots: CoreCompactionSnapshot[];
+        try {
+            snapshots = await runRequest(
+                tx.objectStore(CORE_COMPACTION_SNAPSHOT_STORE_NAME)
+                    .index("by_character_compacted_at")
+                    .getAll(IDBKeyRange.bound([characterId, ""], [characterId, "\uffff"])),
+            );
+        } catch {
+            snapshots = (await runRequest(
+                tx.objectStore(CORE_COMPACTION_SNAPSHOT_STORE_NAME).getAll(),
+            )).filter(snapshot => snapshot.characterId === characterId);
+        }
+        return snapshots
+            .filter(snapshot => !snapshot.restoredAt)
+            .sort((left, right) => right.compactedAt.localeCompare(left.compactedAt))[0] ?? null;
+    } finally {
+        db.close();
+    }
+}
+
+/** Restore one snapshot without touching links, long-term memory, Chat, or Story data. */
+export async function restoreCoreCompactionSnapshot(
+    characterId: string,
+    runId?: string,
+): Promise<CoreCompactionSnapshot> {
+    const snapshot = runId
+        ? await loadCoreCompactionSnapshotByRunId(runId)
+        : await loadLatestCoreCompactionSnapshot(characterId);
+    if (!snapshot || snapshot.characterId !== characterId || snapshot.restoredAt) {
+        throw new Error("没有可恢复的核心记忆整理快照");
+    }
+
+    const db = await openDb();
+    if (!db) throw new Error("记忆数据库不可用");
+    try {
+        const tx = db.transaction([STORE_NAME, CORE_COMPACTION_SNAPSHOT_STORE_NAME], "readwrite");
+        const memoryStore = tx.objectStore(STORE_NAME);
+        const snapshotStore = tx.objectStore(CORE_COMPACTION_SNAPSHOT_STORE_NAME);
+        for (const id of snapshot.createdMemoryIds) memoryStore.delete(id);
+        // add() protects any unrelated record that happens to reuse an old ID.
+        for (const entry of snapshot.originalEntries) memoryStore.add(entry);
+        const restoredSnapshot: CoreCompactionSnapshot = {
+            ...snapshot,
+            originalEntries: snapshot.originalEntries.map(entry => ({ ...entry })),
+            createdMemoryIds: [...snapshot.createdMemoryIds],
+            restoredAt: new Date().toISOString(),
+        };
+        snapshotStore.put(restoredSnapshot);
+        await transactionDone(tx);
+        return restoredSnapshot;
+    } finally {
+        db.close();
+    }
 }
 
 // ── Memory Link CRUD ──
@@ -358,6 +502,14 @@ export async function deleteMemoryEntries(ids: string[]): Promise<void> {
     }
     void deleteMemoryLinksForMemoryIds(ids)
         .catch(error => console.warn("[MemoryLinks] Orphan cleanup failed after memory delete:", error));
+}
+
+function transactionDone(transaction: IDBTransaction): Promise<void> {
+    return new Promise((resolve, reject) => {
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error ?? new Error("Memory transaction failed"));
+        transaction.onabort = () => reject(transaction.error ?? new Error("Memory transaction aborted"));
+    });
 }
 
 /** Delete entries without touching links owned by another lifecycle or migration. */

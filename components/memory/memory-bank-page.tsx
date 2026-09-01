@@ -25,6 +25,13 @@ import { hydrateChatStorage } from "@/lib/chat-storage";
 import { loadNativeTimeline, type NativeTimelineEntry } from "@/lib/short-term-assembler";
 import { runSummarizationPipeline } from "@/lib/memory-summarizer";
 import { runCoreMemoryPipeline } from "@/lib/core-memory-builder";
+import {
+    applyCoreMemoryCompaction,
+    loadLatestCoreMemoryCompactionSnapshot,
+    previewCoreMemoryCompaction,
+    restoreCoreMemoryCompaction,
+    type CoreCompactionPreview,
+} from "@/lib/core-memory-compaction";
 import { resolveAuxiliaryApiConfig, resolveUserIdentity } from "@/lib/settings-storage";
 import { generateEmbedding, resolveEmbeddingModel } from "@/lib/memory-embedding";
 import { BINDING_ACCENTS } from "@/lib/ui-accent-colors";
@@ -205,6 +212,10 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
     const [savingMemory, setSavingMemory] = useState(false);
     const [summarizeRangeOpen, setSummarizeRangeOpen] = useState(false);
     const [sourcePickerOpen, setSourcePickerOpen] = useState(false);
+    const [coreCompactionPreview, setCoreCompactionPreview] = useState<CoreCompactionPreview | null>(null);
+    const [latestCoreCompactionSnapshot, setLatestCoreCompactionSnapshot] = useState<Awaited<ReturnType<typeof loadLatestCoreMemoryCompactionSnapshot>>>(null);
+    const [compactingCore, setCompactingCore] = useState(false);
+    const [restoringCore, setRestoringCore] = useState(false);
 
     const disabledSourceCount = MEMORY_SOURCE_OPTIONS
         .filter(source => (config.shortTermAllowedSources ?? {})[source.key] === false).length;
@@ -278,9 +289,11 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
             ]);
             setCoreEntries(core);
             setLongTermEntries(lt);
+            setLatestCoreCompactionSnapshot(await loadLatestCoreMemoryCompactionSnapshot(charId));
         } catch {
             setCoreEntries([]);
             setLongTermEntries([]);
+            setLatestCoreCompactionSnapshot(null);
         }
         // Native timeline is sync (localStorage) — no await needed.
         // 只取最近一段（全量可能几万条），防止解析+渲染把 iOS Safari 内存顶爆
@@ -405,6 +418,68 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
             showNotice("核心记忆重建失败: " + String(err));
         } finally {
             setRebuildingCore(false);
+        }
+    };
+
+    const handlePreviewCoreCompaction = async () => {
+        if (!selectedCharId || compactingCore) return;
+        setCompactingCore(true);
+        try {
+            const result = await previewCoreMemoryCompaction(selectedCharId, selectedChar?.name ?? "");
+            if (result.success) {
+                setCoreCompactionPreview(result.preview);
+            } else {
+                showNotice(result.error);
+            }
+        } catch (error) {
+            console.error("[MemoryBank] Core compaction preview failed:", error);
+            showNotice("核心记忆整理预览失败: " + String(error));
+        } finally {
+            setCompactingCore(false);
+        }
+    };
+
+    const handleApplyCoreCompaction = async () => {
+        if (!coreCompactionPreview || compactingCore) return;
+        setCompactingCore(true);
+        try {
+            const result = await applyCoreMemoryCompaction(coreCompactionPreview);
+            if (result.success) {
+                setCoreCompactionPreview(null);
+                showNotice(`核心记忆整理已应用（${result.createdCount}条）`);
+                if (selectedCharId) {
+                    void loadDetailData(selectedCharId);
+                    void loadCharacterList();
+                }
+            } else {
+                showNotice(result.error);
+            }
+        } catch (error) {
+            console.error("[MemoryBank] Core compaction apply failed:", error);
+            showNotice("核心记忆整理应用失败: " + String(error));
+        } finally {
+            setCompactingCore(false);
+        }
+    };
+
+    const handleRestoreCoreCompaction = async () => {
+        if (!selectedCharId || !latestCoreCompactionSnapshot || restoringCore) return;
+        setRestoringCore(true);
+        try {
+            const result = await restoreCoreMemoryCompaction(selectedCharId, latestCoreCompactionSnapshot.runId);
+            if (result.success) {
+                setLatestCoreCompactionSnapshot(null);
+                showNotice("已恢复整理前核心记忆");
+                void loadDetailData(selectedCharId);
+                void loadCharacterList();
+            } else {
+                showNotice(result.error);
+            }
+        } catch (error) {
+            console.error("[MemoryBank] Core compaction restore failed:", error);
+            showNotice("恢复整理前核心记忆失败: " + String(error));
+        } finally {
+            setRestoringCore(false);
         }
     };
 
@@ -869,6 +944,80 @@ export function MemoryBankPage({ view, selectedCharId, onSelectChar, onNotice }:
                                 </div>
                             </div>
                         </div>
+
+                        <p className="menu-group-desc mx-2">核心记忆整理</p>
+                        <div className="menu-group">
+                            <div className="menu-item">
+                                <MemorySettingsIcon icon={Brain} color={BINDING_ACCENTS.memory} />
+                                <div className="menu-label-group">
+                                    <span className="menu-label">核心记忆整理</span>
+                                    <span className="menu-desc">将当前已有的核心记忆整理成更短、更独立的稳定事实。不会修改长期记忆、聊天、剧情或记忆关联。</span>
+                                </div>
+                                <div className="menu-right">
+                                    <button
+                                        className="ui-btn ui-btn-outline py-1 px-3 ts-12"
+                                        onClick={() => void handlePreviewCoreCompaction()}
+                                        disabled={compactingCore || restoringCore}
+                                    >
+                                        <Brain size={12} className="mr-1" />
+                                        {compactingCore ? "处理中..." : "预览整理"}
+                                    </button>
+                                </div>
+                            </div>
+                            {latestCoreCompactionSnapshot ? (
+                                <div className="menu-item">
+                                    <MemorySettingsIcon icon={Archive} color={BINDING_ACCENTS.memory} />
+                                    <div className="menu-label-group">
+                                        <span className="menu-label">已保存整理快照</span>
+                                        <span className="menu-desc">可完整恢复本次整理前的核心记忆</span>
+                                    </div>
+                                    <div className="menu-right">
+                                        <button
+                                            className="ui-btn ui-btn-outline py-1 px-3 ts-12"
+                                            onClick={() => void handleRestoreCoreCompaction()}
+                                            disabled={compactingCore || restoringCore}
+                                        >
+                                            <Archive size={12} className="mr-1" />
+                                            {restoringCore ? "恢复中..." : "恢复整理前核心记忆"}
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : null}
+                        </div>
+
+                        {coreCompactionPreview ? (
+                            <div className="modal-overlay modal-overlay-bottom" data-ui="modal" onClick={() => compactingCore ? undefined : setCoreCompactionPreview(null)}>
+                                <div className="modal-sheet" data-ui="modal-sheet" onClick={event => event.stopPropagation()}>
+                                    <div className="modal-header" data-ui="modal-header">
+                                        <button className="modal-header-btn modal-header-btn-muted" onClick={() => setCoreCompactionPreview(null)} disabled={compactingCore}><X size={18} /></button>
+                                        <h3 className="modal-title">核心记忆整理预览</h3>
+                                        <span style={{ width: 44 }} />
+                                    </div>
+                                    <div className="modal-body modal-body-tight" data-ui="modal-body">
+                                        <div className="menu-group-desc">角色：{coreCompactionPreview.characterName} · 原 Core {coreCompactionPreview.originalCount} 条 · 整理后候选 {coreCompactionPreview.candidateCount} 条</div>
+                                        <div className="menu-group">
+                                            <div className="px-4 pt-3 pb-1 ts-12 font-bold text-secondary">整理前</div>
+                                            {coreCompactionPreview.originalEntries.map(entry => (
+                                                <div key={entry.id} className="px-4 py-2 ts-13 leading-relaxed">{entry.content}</div>
+                                            ))}
+                                        </div>
+                                        <div className="menu-group">
+                                            <div className="px-4 pt-3 pb-1 ts-12 font-bold text-secondary">整理后</div>
+                                            {coreCompactionPreview.candidates.map((candidate, index) => (
+                                                <div key={`${candidate.content}-${index}`} className="px-4 py-2 ts-13 leading-relaxed">{candidate.content}</div>
+                                            ))}
+                                        </div>
+                                        <button
+                                            className="ui-btn ui-btn-primary w-full p-2.5"
+                                            onClick={() => void handleApplyCoreCompaction()}
+                                            disabled={compactingCore}
+                                        >
+                                            {compactingCore ? "应用中..." : "应用整理结果"}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : null}
 
                         {summarizeRangeOpen ? (
                             <div className="modal-overlay modal-overlay-bottom" data-ui="modal" onClick={() => setSummarizeRangeOpen(false)}>

@@ -122,6 +122,17 @@ export type MemoryEntry = {
     metadata?: Record<string, unknown>;
 };
 
+/** Exact pre-compaction Core snapshot used by the one-time maintenance flow. */
+export type CoreCompactionSnapshot = {
+    runId: string;
+    characterId: string;
+    createdAt: string;
+    compactedAt: string;
+    originalEntries: MemoryEntry[];
+    createdMemoryIds: string[];
+    restoredAt?: string;
+};
+
 export type MemoryConfig = {
     autoSummarizeEnabled: boolean;          // whether auto-summarization runs after N events
     autoBuildCoreEnabled: boolean;          // whether core memories rebuild after long-term summarization
