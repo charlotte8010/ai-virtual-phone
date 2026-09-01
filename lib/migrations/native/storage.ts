@@ -33,24 +33,46 @@ const CALENDAR_KEY = "ai_phone_calendar_plans_v1";
 const ARCHIVE_KEY_PREFIX = "ai_phone_migration_archive_v1:";
 const ID_MAP_KEY_PREFIX = "ai_phone_migration_id_map_v1:";
 
-function archiveKey(fingerprint: string): string { return `${ARCHIVE_KEY_PREFIX}${migrationKvSuffix(fingerprint)}`; }
-function idMapKey(fingerprint: string): string { return `${ID_MAP_KEY_PREFIX}${migrationKvSuffix(fingerprint)}`; }
+function archiveKey(fingerprint: string): string {
+  return `${ARCHIVE_KEY_PREFIX}${migrationKvSuffix(fingerprint)}`;
+}
+
+function idMapKey(fingerprint: string): string {
+  return `${ID_MAP_KEY_PREFIX}${migrationKvSuffix(fingerprint)}`;
+}
 
 function parseArray<T>(raw: string | null): T[] {
   if (!raw) return [];
-  try { const value = JSON.parse(raw); return Array.isArray(value) ? value as T[] : []; }
-  catch { return []; }
+  try {
+    const value = JSON.parse(raw);
+    return Array.isArray(value) ? value as T[] : [];
+  } catch {
+    return [];
+  }
 }
+
 function parseObject<T>(raw: string | null): T | undefined {
   if (!raw) return undefined;
-  try { const value = JSON.parse(raw); return value && typeof value === "object" ? value as T : undefined; }
-  catch { return undefined; }
+  try {
+    const value = JSON.parse(raw);
+    return value && typeof value === "object" ? value as T : undefined;
+  } catch {
+    return undefined;
+  }
 }
+
 function mediaCategory(mime = ""): "audio" | "image" | "video" | "file" {
   if (mime.startsWith("image/")) return "image";
   if (mime.startsWith("audio/")) return "audio";
   if (mime.startsWith("video/")) return "video";
   return "file";
+}
+
+/** Copy into an ArrayBuffer-backed view so DOM BlobPart typing never sees SharedArrayBuffer. */
+function blobFromBytes(bytes: Uint8Array, mimeType: string): Blob {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return new Blob([copy.buffer], { type: mimeType });
 }
 
 interface MediaCacheEntry {
@@ -105,21 +127,31 @@ export interface NativeMigrationStorage {
   dispose?(): Promise<void>;
 }
 
-function ids<T>(values: T[], idOf: (value: T) => string): string[] { return values.map(idOf); }
+function ids<T>(values: T[], idOf: (value: T) => string): string[] {
+  return values.map(idOf);
+}
 
 export class ProductionNativeMigrationStorage implements NativeMigrationStorage {
   readonly kind = "production" as const;
 
   private requireHydratedKv(): void {
-    if (!isKvHydrated()) throw new Error("Float KV storage must be hydrated before migration dry-run/apply");
+    if (!isKvHydrated()) {
+      throw new Error("Float KV storage must be hydrated before migration dry-run/apply");
+    }
   }
 
-  async saveJournal(journal: MigrationRunJournal): Promise<void> { await saveMigrationJournal(journal); }
-  async readJournal(runId: string): Promise<MigrationRunJournal | null> { return loadMigrationJournals().find((entry) => entry.runId === runId) ?? null; }
+  async saveJournal(journal: MigrationRunJournal): Promise<void> {
+    await saveMigrationJournal(journal);
+  }
+
+  async readJournal(runId: string): Promise<MigrationRunJournal | null> {
+    return loadMigrationJournals().find((entry) => entry.runId === runId) ?? null;
+  }
 
   async readSnapshot(plan: NativeMigrationPlan): Promise<NativeMigrationSnapshot> {
     this.requireHydratedKv();
     const calendarStore = parseObject<{ plans?: CalendarWeekPlan[] }>(kvGet(CALENDAR_KEY));
+    const settingsDb = new MigrationSettingsDatabase();
     const [contacts, sessions, messages, moments, momentComments, media, worldbooks] = await Promise.all([
       chatDb.contacts.toArray(),
       chatDb.sessions.toArray(),
@@ -127,11 +159,16 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
       momentsDb.posts.toArray(),
       momentsDb.comments.toArray(),
       listMediaCacheSummaries(),
-      new MigrationSettingsDatabase().worldBooks.toArray().catch(() => [] as WorldBookConfig[]),
+      settingsDb.worldBooks.toArray().catch(() => [] as WorldBookConfig[]),
     ]);
+    settingsDb.close();
+
     const memoryCharacterIds = [...new Set(plan.memories.map((entry) => entry.characterId))];
     const memories: MemoryEntry[] = [];
-    for (const characterId of memoryCharacterIds) memories.push(...await loadMemoryEntries(characterId));
+    for (const characterId of memoryCharacterIds) {
+      memories.push(...await loadMemoryEntries(characterId));
+    }
+
     return {
       identities: parseArray<UserIdentity>(kvGet(IDENTITIES_KEY)),
       characters: parseArray<Character>(kvGet(CHARACTERS_KEY)),
@@ -144,7 +181,7 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
       diaries: parseArray<DiaryEntry>(kvGet(DIARY_KEY)),
       worlds: parseArray<CharacterWorldGroup>(kvGet(WORLDS_KEY)),
       worldbooks,
-      calendar: Array.isArray(calendarStore?.plans) ? calendarStore!.plans! : [],
+      calendar: Array.isArray(calendarStore?.plans) ? calendarStore.plans : [],
       memories,
       archive: parseObject<NativeMigrationArchive>(kvGet(archiveKey(plan.sourceFingerprint))),
       idMap: parseObject<Record<string, Record<string, string>>>(kvGet(idMapKey(plan.sourceFingerprint))),
@@ -162,7 +199,13 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
     const failures: string[] = [];
     const before = await this.readSnapshot(plan);
 
-    const writeKvArray = async <T>(key: string, current: T[], additions: T[], domain: keyof typeof created, idOf: (value: T) => string) => {
+    const writeKvArray = async <T>(
+      key: string,
+      current: T[],
+      additions: T[],
+      domain: keyof typeof created,
+      idOf: (value: T) => string,
+    ): Promise<void> => {
       if (!additions.length) return;
       await kvSetAsync(key, JSON.stringify([...current, ...additions]));
       created[domain] = ids(additions, idOf);
@@ -195,7 +238,7 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
           const mimeType = media.source.mediaType || "application/octet-stream";
           rows.push({
             id: media.targetId,
-            blob: new Blob([bytes], { type: mimeType }),
+            blob: blobFromBytes(bytes, mimeType),
             mimeType,
             mediaCategory: mediaCategory(mimeType),
             createdAt: Date.parse(plan.manifest.createdAt),
@@ -228,23 +271,26 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
       }
 
       if (reconciliation.calendar.create.length) {
-        const current = before.calendar;
-        await kvSetAsync(CALENDAR_KEY, JSON.stringify({ plans: [...current, ...reconciliation.calendar.create] }));
+        await kvSetAsync(CALENDAR_KEY, JSON.stringify({ plans: [...before.calendar, ...reconciliation.calendar.create] }));
         created.calendar = ids(reconciliation.calendar.create, (entry) => entry.id);
       }
 
       if (reconciliation.memories.create.length) {
-        for (const entry of reconciliation.memories.create) await saveMemoryEntry(entry);
+        for (const entry of reconciliation.memories.create) {
+          await saveMemoryEntry(entry);
+        }
         created.memories = ids(reconciliation.memories.create, (entry) => entry.id);
       }
 
       if (reconciliation.archive === "create") {
-        await kvSetAsync(archiveKey(plan.sourceFingerprint), JSON.stringify(plan.archive));
-        created.archive = [archiveKey(plan.sourceFingerprint)];
+        const key = archiveKey(plan.sourceFingerprint);
+        await kvSetAsync(key, JSON.stringify(plan.archive));
+        created.archive = [key];
       }
       if (reconciliation.idMap === "create") {
-        await kvSetAsync(idMapKey(plan.sourceFingerprint), JSON.stringify(plan.idMap));
-        created.idMap = [idMapKey(plan.sourceFingerprint)];
+        const key = idMapKey(plan.sourceFingerprint);
+        await kvSetAsync(key, JSON.stringify(plan.idMap));
+        created.idMap = [key];
       }
     } catch (error) {
       failures.push(error instanceof Error ? error.message : "unknown native storage write failure");
@@ -257,11 +303,13 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
     this.requireHydratedKv();
     const warnings: string[] = [];
     const failures: string[] = [];
-    const removeFromKvArray = async <T extends { id: string }>(key: string, idsToRemove: string[]) => {
+
+    const removeFromKvArray = async <T extends { id: string }>(key: string, idsToRemove: string[]): Promise<void> => {
       if (!idsToRemove.length) return;
       const remove = new Set(idsToRemove);
       await kvSetAsync(key, JSON.stringify(parseArray<T>(kvGet(key)).filter((entry) => !remove.has(entry.id))));
     };
+
     try {
       await removeFromKvArray<UserIdentity>(IDENTITIES_KEY, journal.created.identities ?? []);
       await removeFromKvArray<Character>(CHARACTERS_KEY, journal.created.characters ?? []);
@@ -279,12 +327,14 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
         await db.entries.bulkDelete(journal.created.media);
         db.close();
       }
+
       if ((journal.created.moments?.length ?? 0) || (journal.created.momentComments?.length ?? 0)) {
         await momentsDb.transaction("rw", momentsDb.posts, momentsDb.comments, async () => {
           if (journal.created.moments?.length) await momentsDb.posts.bulkDelete(journal.created.moments);
           if (journal.created.momentComments?.length) await momentsDb.comments.bulkDelete(journal.created.momentComments);
         });
       }
+
       await removeFromKvArray<DiaryEntry>(DIARY_KEY, journal.created.diaries ?? []);
       await removeFromKvArray<CharacterWorldGroup>(WORLDS_KEY, journal.created.worlds ?? []);
 
@@ -293,12 +343,16 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
         await db.worldBooks.bulkDelete(journal.created.worldbooks);
         db.close();
       }
+
       if (journal.created.calendar?.length) {
         const remove = new Set(journal.created.calendar);
         const store = parseObject<{ plans?: CalendarWeekPlan[] }>(kvGet(CALENDAR_KEY));
         await kvSetAsync(CALENDAR_KEY, JSON.stringify({ plans: (store?.plans ?? []).filter((entry) => !remove.has(entry.id)) }));
       }
-      if (journal.created.memories?.length) await deleteMemoryEntries(journal.created.memories);
+
+      if (journal.created.memories?.length) {
+        await deleteMemoryEntries(journal.created.memories);
+      }
 
       const durableKv = new MigrationKvDatabase();
       for (const key of [...(journal.created.archive ?? []), ...(journal.created.idMap ?? [])]) {
@@ -309,14 +363,12 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
     } catch (error) {
       failures.push(error instanceof Error ? error.message : "unknown rollback failure");
     }
+
     return { warnings, failures };
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Isolated browser integration storage. It never opens an AiPhone* database.
-// ─────────────────────────────────────────────────────────────────────────────
-
+// This adapter is intentionally self-contained and never opens an AiPhone* database.
 class IsolatedMigrationDatabase extends Dexie {
   identities!: Table<UserIdentity, string>;
   characters!: Table<Character, string>;
@@ -332,13 +384,24 @@ class IsolatedMigrationDatabase extends Dexie {
   calendar!: Table<CalendarWeekPlan, string>;
   memories!: Table<MemoryEntry, string>;
   meta!: Table<{ key: string; value: string }, string>;
+
   constructor(name: string) {
     super(name);
     this.version(1).stores({
-      identities: "id", characters: "id", contacts: "id, characterId", sessions: "id, contactId",
-      messages: "id, sessionId, createdAt", media: "id, createdAt", moments: "id, authorId, createdAt",
-      momentComments: "id, postId, createdAt", diaries: "id, characterId, createdAt", worlds: "id",
-      worldbooks: "id", calendar: "id, ownerId, weekStart", memories: "id, characterId, type", meta: "key",
+      identities: "id",
+      characters: "id",
+      contacts: "id, characterId",
+      sessions: "id, contactId",
+      messages: "id, sessionId, createdAt",
+      media: "id, createdAt",
+      moments: "id, authorId, createdAt",
+      momentComments: "id, postId, createdAt",
+      diaries: "id, characterId, createdAt",
+      worlds: "id",
+      worldbooks: "id",
+      calendar: "id, ownerId, weekStart",
+      memories: "id, characterId, type",
+      meta: "key",
     });
   }
 }
@@ -347,6 +410,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
   readonly kind = "isolated-browser" as const;
   readonly databaseName: string;
   private readonly db: IsolatedMigrationDatabase;
+
   constructor(namespace: string) {
     const safe = namespace.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "test";
     this.databaseName = `FloatMigrationIsolation_${safe}`;
@@ -371,71 +435,119 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
   async saveJournal(journal: MigrationRunJournal): Promise<void> {
     await this.db.meta.put({ key: `journal:${journal.runId}`, value: JSON.stringify(journal) });
   }
+
   async readJournal(runId: string): Promise<MigrationRunJournal | null> {
     const row = await this.db.meta.get(`journal:${runId}`);
     return row ? JSON.parse(row.value) as MigrationRunJournal : null;
   }
 
   async readSnapshot(plan: NativeMigrationPlan): Promise<NativeMigrationSnapshot> {
-    const [identities, characters, contacts, sessions, messages, media, moments, momentComments, diaries, worlds, worldbooks, calendar, memories, archiveRow, idMapRow] = await Promise.all([
-      this.db.identities.toArray(), this.db.characters.toArray(), this.db.contacts.toArray(), this.db.sessions.toArray(),
-      this.db.messages.toArray(), this.db.media.toArray(), this.db.moments.toArray(), this.db.momentComments.toArray(),
-      this.db.diaries.toArray(), this.db.worlds.toArray(), this.db.worldbooks.toArray(), this.db.calendar.toArray(),
-      this.db.memories.toArray(), this.db.meta.get(archiveKey(plan.sourceFingerprint)), this.db.meta.get(idMapKey(plan.sourceFingerprint)),
+    const [
+      identities, characters, contacts, sessions, messages, media, moments, momentComments,
+      diaries, worlds, worldbooks, calendar, memories, archiveRow, idMapRow,
+    ] = await Promise.all([
+      this.db.identities.toArray(),
+      this.db.characters.toArray(),
+      this.db.contacts.toArray(),
+      this.db.sessions.toArray(),
+      this.db.messages.toArray(),
+      this.db.media.toArray(),
+      this.db.moments.toArray(),
+      this.db.momentComments.toArray(),
+      this.db.diaries.toArray(),
+      this.db.worlds.toArray(),
+      this.db.worldbooks.toArray(),
+      this.db.calendar.toArray(),
+      this.db.memories.toArray(),
+      this.db.meta.get(archiveKey(plan.sourceFingerprint)),
+      this.db.meta.get(idMapKey(plan.sourceFingerprint)),
     ]);
+
     return {
-      identities, characters, contacts, sessions, messages, mediaIds: media.map((entry) => entry.id), moments, momentComments,
-      diaries, worlds, worldbooks, calendar, memories,
+      identities,
+      characters,
+      contacts,
+      sessions,
+      messages,
+      mediaIds: media.map((entry) => entry.id),
+      moments,
+      momentComments,
+      diaries,
+      worlds,
+      worldbooks,
+      calendar,
+      memories,
       archive: archiveRow ? JSON.parse(archiveRow.value) as NativeMigrationArchive : undefined,
       idMap: idMapRow ? JSON.parse(idMapRow.value) as Record<string, Record<string, string>> : undefined,
     };
   }
 
-  async applyCreates(plan: NativeMigrationPlan, r: NativeMigrationReconciliation, pkg: ReadFloatMigrationPackageSuccess): Promise<NativeMigrationApplyStorageResult> {
+  async applyCreates(
+    plan: NativeMigrationPlan,
+    reconciliation: NativeMigrationReconciliation,
+    pkg: ReadFloatMigrationPackageSuccess,
+  ): Promise<NativeMigrationApplyStorageResult> {
     const created: MigrationRunJournal["created"] = {};
     const warnings: string[] = [];
     const failures: string[] = [];
+
     try {
-      await this.db.transaction("rw",
-        this.db.identities, this.db.characters, this.db.contacts, this.db.sessions, this.db.messages,
-        this.db.moments, this.db.momentComments, this.db.diaries, this.db.worlds, this.db.worldbooks,
-        this.db.calendar, this.db.memories, this.db.meta,
+      await this.db.transaction(
+        "rw",
+        [
+          this.db.identities, this.db.characters, this.db.contacts, this.db.sessions, this.db.messages,
+          this.db.moments, this.db.momentComments, this.db.diaries, this.db.worlds, this.db.worldbooks,
+          this.db.calendar, this.db.memories, this.db.meta,
+        ],
         async () => {
-          const put = async <T extends { id: string }>(table: Table<T, string>, values: T[], domain: keyof typeof created) => {
+          const put = async <T extends { id: string }>(table: Table<T, string>, values: T[], domain: keyof typeof created): Promise<void> => {
             if (!values.length) return;
             await table.bulkPut(values);
             created[domain] = values.map((entry) => entry.id);
           };
-          await put(this.db.identities, r.identities.create, "identities");
-          await put(this.db.characters, r.characters.create, "characters");
-          await put(this.db.contacts, r.contacts.create, "contacts");
-          await put(this.db.sessions, r.sessions.create, "sessions");
-          await put(this.db.messages, r.messages.create, "messages");
-          await put(this.db.moments, r.moments.create, "moments");
-          await put(this.db.momentComments, r.momentComments.create, "momentComments");
-          await put(this.db.diaries, r.diaries.create, "diaries");
-          await put(this.db.worlds, r.worlds.create, "worlds");
-          await put(this.db.worldbooks, r.worldbooks.create, "worldbooks");
-          await put(this.db.calendar, r.calendar.create, "calendar");
-          await put(this.db.memories, r.memories.create, "memories");
-          if (r.archive === "create") {
+
+          await put(this.db.identities, reconciliation.identities.create, "identities");
+          await put(this.db.characters, reconciliation.characters.create, "characters");
+          await put(this.db.contacts, reconciliation.contacts.create, "contacts");
+          await put(this.db.sessions, reconciliation.sessions.create, "sessions");
+          await put(this.db.messages, reconciliation.messages.create, "messages");
+          await put(this.db.moments, reconciliation.moments.create, "moments");
+          await put(this.db.momentComments, reconciliation.momentComments.create, "momentComments");
+          await put(this.db.diaries, reconciliation.diaries.create, "diaries");
+          await put(this.db.worlds, reconciliation.worlds.create, "worlds");
+          await put(this.db.worldbooks, reconciliation.worldbooks.create, "worldbooks");
+          await put(this.db.calendar, reconciliation.calendar.create, "calendar");
+          await put(this.db.memories, reconciliation.memories.create, "memories");
+
+          if (reconciliation.archive === "create") {
             const key = archiveKey(plan.sourceFingerprint);
             await this.db.meta.put({ key, value: JSON.stringify(plan.archive) });
             created.archive = [key];
           }
-          if (r.idMap === "create") {
+          if (reconciliation.idMap === "create") {
             const key = idMapKey(plan.sourceFingerprint);
             await this.db.meta.put({ key, value: JSON.stringify(plan.idMap) });
             created.idMap = [key];
           }
-        });
-      if (r.media.create.length) {
+        },
+      );
+
+      if (reconciliation.media.create.length) {
         const rows: MediaCacheEntry[] = [];
-        for (const media of r.media.create) {
+        for (const media of reconciliation.media.create) {
           const bytes = await pkg.getAssetBytes(media.sourceAssetId);
-          if (!bytes) { failures.push(`asset bytes unavailable for ${media.sourceAssetId}`); continue; }
+          if (!bytes) {
+            failures.push(`asset bytes unavailable for ${media.sourceAssetId}`);
+            continue;
+          }
           const mimeType = media.source.mediaType || "application/octet-stream";
-          rows.push({ id: media.targetId, blob: new Blob([bytes], { type: mimeType }), mimeType, mediaCategory: mediaCategory(mimeType), createdAt: Date.parse(plan.manifest.createdAt) });
+          rows.push({
+            id: media.targetId,
+            blob: blobFromBytes(bytes, mimeType),
+            mimeType,
+            mediaCategory: mediaCategory(mimeType),
+            createdAt: Date.parse(plan.manifest.createdAt),
+          });
         }
         if (rows.length) {
           await this.db.media.bulkPut(rows);
@@ -445,18 +557,26 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
     } catch (error) {
       failures.push(error instanceof Error ? error.message : "isolated browser apply failed");
     }
+
     return { created, warnings, failures };
   }
 
   async rollbackCreated(journal: MigrationRunJournal): Promise<{ warnings: string[]; failures: string[] }> {
     const failures: string[] = [];
+
     try {
-      await this.db.transaction("rw",
-        this.db.identities, this.db.characters, this.db.contacts, this.db.sessions, this.db.messages, this.db.media,
-        this.db.moments, this.db.momentComments, this.db.diaries, this.db.worlds, this.db.worldbooks, this.db.calendar,
-        this.db.memories, this.db.meta,
+      await this.db.transaction(
+        "rw",
+        [
+          this.db.identities, this.db.characters, this.db.contacts, this.db.sessions, this.db.messages,
+          this.db.media, this.db.moments, this.db.momentComments, this.db.diaries, this.db.worlds,
+          this.db.worldbooks, this.db.calendar, this.db.memories, this.db.meta,
+        ],
         async () => {
-          const del = async <T>(table: Table<T, string>, values?: string[]) => { if (values?.length) await table.bulkDelete(values); };
+          const del = async <T>(table: Table<T, string>, values?: string[]): Promise<void> => {
+            if (values?.length) await table.bulkDelete(values);
+          };
+
           await del(this.db.identities, journal.created.identities);
           await del(this.db.characters, journal.created.characters);
           await del(this.db.contacts, journal.created.contacts);
@@ -470,11 +590,16 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
           await del(this.db.worldbooks, journal.created.worldbooks);
           await del(this.db.calendar, journal.created.calendar);
           await del(this.db.memories, journal.created.memories);
-          for (const key of [...(journal.created.archive ?? []), ...(journal.created.idMap ?? [])]) await this.db.meta.delete(key);
-        });
+
+          for (const key of [...(journal.created.archive ?? []), ...(journal.created.idMap ?? [])]) {
+            await this.db.meta.delete(key);
+          }
+        },
+      );
     } catch (error) {
       failures.push(error instanceof Error ? error.message : "isolated browser rollback failed");
     }
+
     return { warnings: [], failures };
   }
 
