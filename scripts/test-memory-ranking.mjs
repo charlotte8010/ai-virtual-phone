@@ -132,6 +132,48 @@ const selectedCluster = ranking.selectRankedMemoryCandidates(
 assert.equal(selectedCluster.filter(item => item.memory.metadata?.sourceEventSignatures?.[0] === "batch:one").length, 2);
 assert.equal(selectedCluster.some(item => item.memory.id === "other-cluster"), true);
 
+const protectedClusterEntries = [
+    ...["ordinary-a", "ordinary-b"].map(id => ({
+        memory: memory(id, {
+            content: `同一批次普通候选 ${id}`,
+            importance: 1,
+            metadata: { sourceEventSignatures: ["batch:protected-priority"] },
+        }),
+        source: "keyword",
+        keywordScore: 1,
+    })),
+    {
+        memory: memory("protected-c", {
+            content: "今天的受保护约定。",
+            kind: "future_intent",
+            importance: 0.1,
+            metadata: { sourceEventSignatures: ["batch:protected-priority"] },
+            futureIntent: {
+                type: "plan",
+                status: "pending",
+                timePrecision: "day",
+                targetAt: "2026-09-01T14:00:00.000Z",
+            },
+        }),
+        source: "future_intent",
+    },
+];
+const protectedClusterRanked = ranking.rankMemoryCandidates(
+    protectedClusterEntries,
+    "普通候选",
+    { now, timezone: "Asia/Shanghai" },
+);
+assert.equal(protectedClusterRanked[0].memory.id, "ordinary-a");
+const protectedClusterSelected = ranking.selectRankedMemoryCandidates(
+    protectedClusterRanked,
+    { tokenBudget: 10000, maxSelected: 3, maxProtectedFutureIntents: 1, maxPerCluster: 2 },
+);
+assert.equal(protectedClusterSelected[0].memory.id, "protected-c");
+assert.equal(protectedClusterSelected[0].protectedReason, "due_today");
+assert.equal(protectedClusterSelected.filter(item => item.protectedReason).length, 1);
+assert.equal(protectedClusterSelected.filter(item => item.clusterKey === protectedClusterSelected[0].clusterKey).length, 2);
+assert.equal(protectedClusterSelected.filter(item => item.memory.id.startsWith("ordinary-")).length, 1);
+
 const manyMemories = Array.from({ length: 5 }, (_, index) => ({
     memory: memory(`limited-${index}`, { importance: 0.9 - index * 0.1 }),
     source: "recent",
@@ -173,7 +215,7 @@ const protectedOverflow = ranking.selectRankedMemoryCandidates(
     ),
     { tokenBudget: 10000, maxSelected: 4, maxProtectedFutureIntents: 2 },
 );
-assert.ok(protectedOverflow.filter(item => item.protectedReason).length <= 2);
+assert.equal(protectedOverflow.filter(item => item.protectedReason).length, 2);
 
 const promptText = injector.formatLongTermMemories([dueToday, tagged], {
     now,
