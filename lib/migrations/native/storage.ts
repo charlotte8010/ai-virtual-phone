@@ -11,7 +11,7 @@ import type { CharacterWorldGroup } from "../../character-world-storage";
 import type { WorldBookConfig } from "../../settings-types";
 import type { CalendarWeekPlan } from "../../calendar-types";
 import type { MemoryEntry, MemoryLink } from "../../memory-types";
-import { deleteMemoryEntries, deleteMemoryLinks, loadMemoryEntries, loadMemoryLinks, saveMemoryEntries, saveMemoryLinks } from "../../memory-storage";
+import { deleteMemoryEntriesWithoutLinkCleanup, deleteMemoryLinks, loadMemoryEntries, loadMemoryLinks, saveMemoryEntries, saveMemoryLinks } from "../../memory-storage";
 import { isKvHydrated, kvGet, kvRemove, kvSetAsync } from "../../kv-db";
 import { listMediaCacheSummaries } from "../../media-cache-storage";
 import type { UserIdentity } from "../../../components/settings/user-identity";
@@ -398,11 +398,11 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
         await kvSetAsync(CALENDAR_KEY, JSON.stringify({ plans: (store?.plans ?? []).filter((entry) => !remove.has(entry.id)) }));
       }
 
-      if (journal.created.memories?.length) {
-        await deleteMemoryEntries(journal.created.memories);
-      }
       if (journal.created.memoryLinks?.length) {
         await deleteMemoryLinks(journal.created.memoryLinks);
+      }
+      if (journal.created.memories?.length) {
+        await deleteMemoryEntriesWithoutLinkCleanup(journal.created.memories);
       }
 
       const durableKv = new MigrationKvDatabase();
@@ -662,8 +662,8 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
           await del(this.db.worlds, journal.created.worlds);
           await del(this.db.worldbooks, journal.created.worldbooks);
           await del(this.db.calendar, journal.created.calendar);
-          await del(this.db.memories, journal.created.memories);
           await del(this.db.memoryLinks, journal.created.memoryLinks);
+          await del(this.db.memories, journal.created.memories);
 
           for (const key of [...(journal.created.archive ?? []), ...(journal.created.idMap ?? [])]) {
             await this.db.meta.delete(key);

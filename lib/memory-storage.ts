@@ -360,6 +360,25 @@ export async function deleteMemoryEntries(ids: string[]): Promise<void> {
         .catch(error => console.warn("[MemoryLinks] Orphan cleanup failed after memory delete:", error));
 }
 
+/** Delete entries without touching links owned by another lifecycle or migration. */
+export async function deleteMemoryEntriesWithoutLinkCleanup(ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const db = await openDb();
+    if (!db) return;
+    try {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        for (const id of ids) store.delete(id);
+        await new Promise<void>((resolve, reject) => {
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error ?? new Error("Memory migration delete failed"));
+            tx.onabort = () => reject(tx.error ?? new Error("Memory migration delete aborted"));
+        });
+    } finally {
+        db.close();
+    }
+}
+
 export async function deleteCharacterMemories(characterId: string): Promise<void> {
     const entries = await loadMemoryEntries(characterId);
     await deleteMemoryEntries(entries.map(e => e.id));

@@ -88,7 +88,6 @@ function reconcileMemoryLinks(
         actualIdByPlannedId.set(value.id, byId.id);
       } else {
         conflicts.push({ planned: value, existing: byId, reason: `target id ${value.id} already exists with different content` });
-        actualIdByPlannedId.set(value.id, value.id);
       }
       continue;
     }
@@ -161,10 +160,10 @@ function resolveIdMap(
   }
   const plannedMemoryLinks = resolved.memoryLinks;
   if (plannedMemoryLinks) {
-    resolved.memoryLinks = Object.fromEntries(Object.entries(plannedMemoryLinks).map(([sourceId, plannedId]) => [
-      sourceId,
-      memoryLinkIds.get(plannedId) ?? plannedId,
-    ]));
+    resolved.memoryLinks = Object.fromEntries(Object.entries(plannedMemoryLinks).flatMap(([sourceId, plannedId]) => {
+      const actualId = memoryLinkIds.get(plannedId);
+      return actualId ? [[sourceId, actualId]] : [];
+    }));
   }
   return resolved;
 }

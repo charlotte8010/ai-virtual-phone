@@ -114,13 +114,14 @@ export function mapNativeMemoryLinks(
 
     const fromActive = activeMemoryBySourceId.get(from.migrationId);
     const toActive = activeMemoryBySourceId.get(to.migrationId);
-    const sameCharacterActive = (
-      from.archived !== true
-      && to.archived !== true
+    const bothEndpointsActive = Boolean(
+      fromActive
+      && toActive
+      && fromActive.characterId === toActive.characterId
       && from.characterRef
       && from.characterRef === to.characterRef
     );
-    if (sameCharacterActive) {
+    if (bothEndpointsActive) {
       audit.bothEndpointsActive += 1;
       if (!sourceType) audit.invalidType += 1;
       if (strength === undefined) {

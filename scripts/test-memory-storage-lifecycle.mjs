@@ -16,6 +16,7 @@ context.window = {
 };
 context.indexedDB = {};
 context.__memoryRecords = new Map();
+context.__memoryLinks = new Map();
 context.__lifecycle = {
     dynamicImports: 0,
     generation: [],
@@ -35,9 +36,11 @@ function createMemoryTransaction(storeName) {
             return {
                 put(entry) {
                     if (storeName === "memories") context.__memoryRecords.set(entry.id, { ...entry });
+                    if (storeName === "memory_links") context.__memoryLinks.set(entry.id, { ...entry });
                 },
                 delete(id) {
                     if (storeName === "memories") context.__memoryRecords.delete(id);
+                    if (storeName === "memory_links") context.__memoryLinks.delete(id);
                 },
             };
         },
@@ -142,7 +145,7 @@ function memory(id, overrides = {}) {
 
 const storageModule = await loadModule(resolve(repoRoot, "lib/memory-storage.ts"));
 await storageModule.evaluate();
-const { saveMemoryEntry, saveMemoryEntries } = storageModule.namespace;
+const { saveMemoryEntry, saveMemoryEntries, saveMemoryLinks, deleteMemoryLinks, deleteMemoryEntriesWithoutLinkCleanup } = storageModule.namespace;
 
 const suppressedSingle = memory("suppressed-single");
 await saveMemoryEntry(suppressedSingle, { suppressMemoryLinkLifecycle: true });
@@ -209,5 +212,25 @@ await Promise.resolve();
 await Promise.resolve();
 context.__lifecycle.generationFailure = false;
 assert.deepEqual(context.__memoryRecords.get(failureEntry.id), failureEntry);
+
+const migrationCreatedMemory = memory("migration-created-memory");
+const preExistingLink = {
+    id: "pre-existing-link",
+    characterId: migrationCreatedMemory.characterId,
+    fromMemoryId: migrationCreatedMemory.id,
+    toMemoryId: "unrelated-memory",
+    type: "temporal",
+    strength: 0.5,
+    createdAt: migrationCreatedMemory.createdAt,
+    updatedAt: migrationCreatedMemory.updatedAt,
+};
+const migrationCreatedLink = { ...preExistingLink, id: "migration-created-link", toMemoryId: "another-memory" };
+await saveMemoryEntries([migrationCreatedMemory], { suppressMemoryLinkLifecycle: true });
+await saveMemoryLinks([preExistingLink, migrationCreatedLink]);
+await deleteMemoryLinks([migrationCreatedLink.id]);
+await deleteMemoryEntriesWithoutLinkCleanup([migrationCreatedMemory.id]);
+assert.equal(context.__memoryRecords.has(migrationCreatedMemory.id), false);
+assert.equal(context.__memoryLinks.has(preExistingLink.id), true, "rollback must preserve pre-existing links");
+assert.equal(context.__memoryLinks.has(migrationCreatedLink.id), false, "rollback must delete created links");
 
 console.log("memory storage lifecycle tests passed");
