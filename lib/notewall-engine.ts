@@ -5,7 +5,7 @@ import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { loadBindingConfig, loadApiConfigs, loadPresets, loadWorldBooks, loadRegexes, resolveBinding, resolveUserIdentity } from "./settings-storage";
 import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./settings-types";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { parseNoteWallActionContent, parseNoteWallReplyContent, type ParsedNoteWallAction, type ParsedNoteWallReply } from "./notewall-utils";
@@ -102,6 +102,7 @@ async function resolveNoteWallGeneration(
   characterId: string,
   appTags: string[],
   noteWallContext = "",
+  recordMemoryRecall = true,
 ): Promise<ResolvedNoteWallGeneration> {
   const character = loadCharacters().find(entry => entry.id === characterId);
   if (!character) throw new ChatEngineError("找不到要生成便签的角色。");
@@ -149,6 +150,9 @@ async function resolveNoteWallGeneration(
     appId: "diary",
     appTags,
     longTermMemories: formatLongTermMemories(memories),
+    onLongTermMemoriesInjected: recordMemoryRecall
+      ? createMemoryRecallCallback(character.id, memories.map(entry => entry.id))
+      : undefined,
     coreMemories: formatCoreMemories(coreMemories),
     worldBookActivationContext: prepared.wbActivationContext,
     recentBlocks: prepared.recentBlocks,
@@ -214,6 +218,7 @@ export async function previewNoteWallPromptPayload(
     characterId,
     mode === "reply" ? ["diary", "notewall_reply"] : ["diary", "notewall"],
     mode === "reply" ? formatNoteWallReplyContext(candidates, { characterId }) : formatNoteWallContext(notes, { characterId }),
+    false,
   );
   return {
     messages: previewMessagesForApi(resolved.apiConfig, resolved.preset, resolved.messages),

@@ -1,7 +1,7 @@
 // High-level memory orchestration: candidate generation, ranking, and prompt selection.
 
 import type { MemoryConfig, MemoryEntry } from "./memory-types";
-import { loadMemoryConfig, loadMemoryEntriesByType } from "./memory-storage";
+import { loadMemoryConfig, loadMemoryEntriesByType, updateMemoryRecallStats } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { generateEmbedding, resolveEmbeddingModel, cosineSimilarity } from "./memory-embedding";
 import { estimateTokens } from "./token-counter";
@@ -14,6 +14,7 @@ import {
     type MemoryRankingOptions,
     type MemorySelectionOptions as RankingSelectionOptions,
 } from "./memory-ranking";
+import { getRecallMemoryIds, type RecallWriteGuard } from "./memory-recall-stats";
 
 const VECTOR_TOP_K = 20;
 const KEYWORD_TOP_K = 20;
@@ -229,6 +230,50 @@ export async function retrieveMemoriesForPrompt(
     config: MemoryConfig,
 ): Promise<MemoryEntry[]> {
     return (await selectMemoriesForPrompt(characterId, currentContext, { config })).selected;
+}
+
+export type MemoryRecallCommitOptions = RecallWriteGuard & {
+    recalledAt?: string;
+};
+
+/**
+ * Persist stats only for IDs that the caller confirmed were injected.
+ * Persistence failures are intentionally isolated from the prompt path.
+ */
+export async function commitMemoryRecall(
+    characterId: string,
+    memoryIds: readonly string[],
+    options: MemoryRecallCommitOptions = {},
+): Promise<void> {
+    const selectedIds = getRecallMemoryIds(memoryIds, options);
+    if (selectedIds.length === 0) return;
+
+    try {
+        await updateMemoryRecallStats(
+            characterId,
+            selectedIds,
+            options.recalledAt ?? new Date().toISOString(),
+        );
+    } catch (error) {
+        console.warn("[MemoryService] Recall stats write failed; continuing without blocking prompt", error);
+    }
+}
+
+/** Build the opt-in callback used after the assembler confirms real injection. */
+export function createMemoryRecallCallback(
+    characterId: string,
+    memoryIds: readonly string[],
+    options: MemoryRecallCommitOptions = {},
+): (() => void) | undefined {
+    const selectedIds = getRecallMemoryIds(memoryIds, {
+        ...options,
+        injected: options.injected ?? true,
+    });
+    if (selectedIds.length === 0) return undefined;
+
+    return () => {
+        void commitMemoryRecall(characterId, selectedIds, options);
+    };
 }
 
 /** Legacy retrieval is intentionally isolated so the feature flag is a true rollback path. */

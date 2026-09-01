@@ -15,7 +15,7 @@ import {
 } from "./settings-storage";
 import { assemblePromptPayload } from "./llm-prompt-assembler";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { getCustomStickerExample, getCustomStickerNames } from "./custom-sticker-storage";
@@ -141,6 +141,7 @@ async function resolveCalendarAssemblerInput(
   ownerType: CalendarOwnerType,
   ownerId: string,
   weekStart: string,
+  options?: { recordMemoryRecall?: boolean },
 ): Promise<CalendarAssemblerResolved> {
   const bindings = loadBindingConfig();
   const activeSlot = resolveBinding(bindings, ownerType === "character" ? ownerId : undefined, "calendar");
@@ -185,6 +186,7 @@ async function resolveCalendarAssemblerInput(
   let recentBlocks: import("./short-term-assembler").RecentBlock[] = [];
   let unifiedRecentItems: import("./short-term-assembler").UnifiedRecentItem[] = [];
   let wbActivationContext = "";
+  let onLongTermMemoriesInjected: (() => void) | undefined;
 
   if (ownerType === "character") {
     const prepared = prepareShortTermContext(ownerId, "calendar", { history: [] });
@@ -197,6 +199,9 @@ async function resolveCalendarAssemblerInput(
     ]);
     coreMemories = formatCoreMemories(coreResults);
     longTermMemories = formatLongTermMemories(longResults);
+    if (options?.recordMemoryRecall !== false) {
+      onLongTermMemoriesInjected = createMemoryRecallCallback(ownerId, longResults.map(entry => entry.id));
+    }
   }
 
   const scheduleSummary = buildCalendarScheduleMarker(ownerType, ownerId, weekStart);
@@ -211,6 +216,7 @@ async function resolveCalendarAssemblerInput(
     scheduleSummary,
     coreMemories,
     longTermMemories,
+    onLongTermMemoriesInjected,
     worldBookActivationContext: wbActivationContext || undefined,
     recentBlocks,
     unifiedRecentItems,
@@ -285,7 +291,7 @@ export async function previewCalendarPromptPayload(
   if (ownerType !== "character") {
     throw new Error("用户日程不支持 AI 生成预览。");
   }
-  const resolved = await resolveCalendarAssemblerInput(ownerType, ownerId, weekStart);
+  const resolved = await resolveCalendarAssemblerInput(ownerType, ownerId, weekStart, { recordMemoryRecall: false });
   const weekDates = getWeekDates(weekStart);
   const triggerInstruction = buildCalendarTriggerInstruction(resolved.ownerName, weekDates);
 

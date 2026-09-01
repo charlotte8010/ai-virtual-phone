@@ -12,7 +12,7 @@ import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./se
 import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { previewMessagesForApi, sendLLMRequest, ChatEngineError } from "./chat-engine";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
@@ -180,6 +180,7 @@ async function buildStoryPromptMessages(
   regexes: RegexConfig[],
   worldBooks: WorldBookConfig[],
   contextExcludedTags: string = DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS,
+  recordMemoryRecall = true,
 ): Promise<LLMMessage[]> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) {
@@ -213,6 +214,9 @@ async function buildStoryPromptMessages(
     currentSchedule: getCurrentCalendarScheduleForPrompt("character", characterId, now),
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
+    onLongTermMemoriesInjected: recordMemoryRecall && memories
+      ? createMemoryRecallCallback(characterId, memories.map(entry => entry.id))
+      : undefined,
     worldBookActivationContext: wbActivationContext,
     recentBlocks,
     unifiedRecentItems,
@@ -230,7 +234,7 @@ export async function previewStoryPromptPayload(
   }
   const { apiConfig, preset, regexes, worldBooks } = resolveStoryConfigs(characterId);
   const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() || DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
-  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags);
+  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags, false);
   return {
     messages: previewMessagesForApi(apiConfig, preset, llmMessages),
     characterName: character.name,

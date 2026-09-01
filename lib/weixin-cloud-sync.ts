@@ -37,7 +37,7 @@ import type {
 } from "./settings-types";
 import { loadMemoryConfig, loadMemoryEntries } from "./memory-storage";
 import type { MemoryConfig, MemoryEntry } from "./memory-types";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext, type RecentBlock, type UnifiedRecentItem } from "./short-term-assembler";
 import { applyEditRegex, assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
@@ -696,7 +696,11 @@ export async function buildWeixinCloudRuntimeSnapshot(
 
 export function buildWeixinCloudPromptMessages(
   snapshot: WeixinCloudRuntimeSnapshot,
-  options?: { history?: ChatMessage[]; skipEmptyGenerateGuard?: boolean },
+  options?: {
+    history?: ChatMessage[];
+    skipEmptyGenerateGuard?: boolean;
+    onLongTermMemoriesInjected?: () => void;
+  },
 ): LLMMessage[] {
   const context = snapshot.promptContext;
   if (!context) {
@@ -718,6 +722,7 @@ export function buildWeixinCloudPromptMessages(
     currentSchedule: context.currentSchedule,
     coreMemories: context.coreMemories,
     longTermMemories: context.longTermMemories,
+    onLongTermMemoriesInjected: options?.onLongTermMemoriesInjected,
     worldBookActivationContext: buildWeixinCloudWorldBookActivationContext(context, history),
     recentBlocks: context.recentBlocks,
     unifiedRecentItems,
@@ -1163,7 +1168,11 @@ async function buildWeixinCloudPromptContext(params: {
     promptContext,
     stats: { messageCount: params.messages.length, memoryCount: 0, worldBookCount: 0, regexGroupCount: 0 },
   };
-  promptContext.llmMessages = buildWeixinCloudPromptMessages(shellSnapshot);
+  promptContext.llmMessages = buildWeixinCloudPromptMessages(shellSnapshot, {
+    onLongTermMemoriesInjected: memResults
+      ? createMemoryRecallCallback(params.character.id, memResults.map(entry => entry.id))
+      : undefined,
+  });
   promptContext.promptTemplate = buildWeixinCloudPromptTemplate(shellSnapshot);
   return promptContext;
 }

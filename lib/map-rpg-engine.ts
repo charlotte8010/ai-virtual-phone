@@ -9,7 +9,7 @@ import type { ApiConfig } from "./settings-types";
 import { loadCharacters } from "./character-storage";
 import { resolveBinding, loadBindingConfig, loadPresets, loadWorldBooks, loadRegexes, resolveUserIdentity, loadApiConfigs } from "./settings-storage";
 import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
-import { retrieveMemoriesForPrompt, retrieveCoreMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveMemoriesForPrompt, retrieveCoreMemoriesForPrompt } from "./memory-service";
 import { formatLongTermMemories, formatCoreMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
 import { prepareShortTermContext } from "./short-term-assembler";
@@ -933,7 +933,7 @@ export async function companionDeclare(
   streamLog?: import("./map-types").StreamMessage[],
   overrideUserIdentity?: import("../components/settings/user-identity").UserIdentity | null,
   overrideAffinity?: number,
-  options?: { instruction?: string },
+  options?: { instruction?: string; recordMemoryRecall?: boolean },
 ): Promise<Declaration> {
   const allChars = loadCharacters();
   const character = allChars.find(c => c.id === characterId);
@@ -992,7 +992,7 @@ async function buildCompanionDeclarePromptPayload(
   streamLog?: import("./map-types").StreamMessage[],
   overrideUserIdentity?: import("../components/settings/user-identity").UserIdentity | null,
   overrideAffinity?: number,
-  options?: { instruction?: string },
+  options?: { instruction?: string; recordMemoryRecall?: boolean },
 ) {
   const allChars = loadCharacters();
   const character = allChars.find(c => c.id === characterId);
@@ -1050,6 +1050,9 @@ async function buildCompanionDeclarePromptPayload(
   const llmMessages = assemblePromptPayload({
     character, history: truncatedHistory, preset, worldBooks, regexes, userIdentity, appId: "adventure",
     longTermMemories, coreMemories, scheduleSummary,
+    onLongTermMemoriesInjected: options?.recordMemoryRecall !== false && memResults
+      ? createMemoryRecallCallback(characterId, memResults.map(entry => entry.id))
+      : undefined,
     recentBlocks, unifiedRecentItems, worldBookActivationContext: wbActivationContext,
     affinity: overrideAffinity !== undefined ? String(overrideAffinity) : undefined,
     chatBilingualInstruction: buildAdventureCharacterBilingualInstruction(
@@ -1066,7 +1069,7 @@ export async function previewAdventureCompanionPromptPayload(
   streamLog?: import("./map-types").StreamMessage[],
   overrideUserIdentity?: import("../components/settings/user-identity").UserIdentity | null,
   overrideAffinity?: number,
-  options?: { instruction?: string },
+  options?: { instruction?: string; recordMemoryRecall?: boolean },
 ): Promise<{ messages: LLMMessage[]; characterName: string; model: string; presetName: string }> {
   const { character, apiConfig, preset, llmMessages } = await buildCompanionDeclarePromptPayload(
     characterId,
@@ -1074,7 +1077,7 @@ export async function previewAdventureCompanionPromptPayload(
     streamLog,
     overrideUserIdentity,
     overrideAffinity,
-    options,
+    { ...options, recordMemoryRecall: false },
   );
   return {
     messages: previewMessagesForApi(apiConfig, preset, llmMessages),

@@ -22,7 +22,7 @@ import {
 } from "./llm-prompt-assembler";
 import type { ApiConfig, PresetConfig, RegexConfig } from "./settings-types";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { previewMessagesForApi, sendLLMRequest } from "./chat-engine";
@@ -60,6 +60,7 @@ async function resolveReadingInput(
         chapterContent: string;
         annotationHistory: string;
         history?: ReturnType<typeof loadChatMessages>;
+        recordMemoryRecall?: boolean;
     },
 ): Promise<{ input: AssemblerInput; apiConfig: ApiConfig | null; preset: PresetConfig | null } | null> {
     const chars = loadCharacters();
@@ -118,6 +119,9 @@ async function resolveReadingInput(
         appTags,
         coreMemories: formatCoreMemories(coreMemories),
         longTermMemories: formatLongTermMemories(longTermMemories),
+        onLongTermMemoriesInjected: options.recordMemoryRecall !== false
+            ? createMemoryRecallCallback(characterId, longTermMemories.map(entry => entry.id))
+            : undefined,
         recentBlocks,
         unifiedRecentItems,
         bookTitle: options.bookTitle,
@@ -358,6 +362,7 @@ export async function previewReadingAnnotationPrompt(
         chapterTitle: chapter.title,
         chapterContent: formatBatchChapterContent(targets),
         annotationHistory: formatBatchAnnotationHistory(existingAnnotations, targets),
+        recordMemoryRecall: false,
     });
     if (!resolved?.apiConfig) throw new Error("未找到 API 配置，请在设置中绑定 API");
 
@@ -386,6 +391,7 @@ export async function previewReadingDiscussPrompt(
         chapterContent: context.chapterContent,
         annotationHistory: formatAnnotationActionContext(context.annotations),
         history,
+        recordMemoryRecall: false,
     });
     if (!resolved?.apiConfig) throw new Error("未找到 API 配置，请在设置中绑定 API");
 

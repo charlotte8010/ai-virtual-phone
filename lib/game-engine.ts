@@ -6,7 +6,7 @@ import { getWeekStartIso } from "./calendar-utils";
 import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { prepareShortTermContext } from "./short-term-assembler";
 import {
   loadApiConfigs,
@@ -112,6 +112,9 @@ export async function buildGameRolePackage(input: {
       : "",
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
+    onLongTermMemoriesInjected: memories
+      ? createMemoryRecallCallback(input.characterId, memories.map(entry => entry.id))
+      : undefined,
     worldBookActivationContext: activationContext,
     recentBlocks: shortTerm?.recentBlocks ?? [],
     unifiedRecentItems: shortTerm?.unifiedRecentItems ?? [],

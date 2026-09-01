@@ -8,7 +8,7 @@ import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { MacroEngine, postProcessTrim } from "./macro-engine";
 import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { maybeRunSummarization } from "./memory-summarizer";
 import { prepareShortTermContext } from "./short-term-assembler";
 import {
@@ -148,6 +148,9 @@ async function buildScenePromptMessages(session: BlackMarketSceneSession, templa
     scheduleSummary: buildCalendarScheduleMarker("character", session.characterId, getWeekStartIso(new Date())),
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
+    onLongTermMemoriesInjected: memories
+      ? createMemoryRecallCallback(session.characterId, memories.map(entry => entry.id))
+      : undefined,
     worldBookActivationContext: wbActivationContext,
     recentBlocks,
     unifiedRecentItems,

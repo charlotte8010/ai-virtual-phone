@@ -13,7 +13,7 @@ import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./se
 import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { previewMessagesForApi, sendLLMRequest, ChatEngineError } from "./chat-engine";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { buildCalendarScheduleMarker } from "./calendar-storage";
@@ -133,7 +133,8 @@ async function buildVnPromptMessages(
   history: VnMessage[],
   preset: PresetConfig | null,
   regexes: RegexConfig[],
-  worldBooks: WorldBookConfig[]
+  worldBooks: WorldBookConfig[],
+  recordMemoryRecall = true,
 ): Promise<LLMMessage[]> {
   const character = loadCharacters().find((c) => c.id === characterId);
   if (!character) {
@@ -169,6 +170,9 @@ async function buildVnPromptMessages(
     scheduleSummary: buildCalendarScheduleMarker("character", characterId, getWeekStartIso(new Date())),
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
+    onLongTermMemoriesInjected: recordMemoryRecall && memories
+      ? createMemoryRecallCallback(characterId, memories.map(entry => entry.id))
+      : undefined,
     worldBookActivationContext: wbActivationContext,
     recentBlocks,
     unifiedRecentItems,
@@ -201,7 +205,7 @@ export async function previewVnPromptPayload(
     throw new ChatEngineError(`Character not found: ${characterId}`);
   }
   const { apiConfig, preset, regexes, worldBooks } = resolveVnConfigs(characterId);
-  const llmMessages = await buildVnPromptMessages(characterId, history, preset, regexes, worldBooks);
+  const llmMessages = await buildVnPromptMessages(characterId, history, preset, regexes, worldBooks, false);
   return {
     messages: previewMessagesForApi(apiConfig, preset, llmMessages),
     characterName: character.name,

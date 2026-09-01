@@ -55,7 +55,7 @@ import type { LLMMessage } from "./llm-prompt-assembler";
 import { assemblePromptPayload } from "./llm-prompt-assembler";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { getAllPosts, loadMomentComments } from "./moments-storage";
 import {
   canCharacterSeeMomentPost,
@@ -118,6 +118,7 @@ async function buildCheckPhoneManifestMessages(
   preset: PresetConfig | null,
   worldBooks: WorldBookConfig[],
   regexes: RegexConfig[],
+  recordMemoryRecall = true,
 ): Promise<LLMMessage[]> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) throw new Error("角色不存在");
@@ -147,6 +148,9 @@ async function buildCheckPhoneManifestMessages(
     scheduleSummary: buildCalendarScheduleMarker("character", characterId, getWeekStartIso(new Date())),
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
+    onLongTermMemoriesInjected: recordMemoryRecall && memories
+      ? createMemoryRecallCallback(characterId, memories.map(entry => entry.id))
+      : undefined,
     worldBookActivationContext: wbActivationContext,
     recentBlocks,
     unifiedRecentItems,
@@ -408,10 +412,11 @@ export async function previewCheckPhonePromptPayload(
       ? formatSnapshotSummary(snapshot.payload)
       : "";
   const messages = targetAppId === "manifest"
-    ? await buildCheckPhoneManifestMessages(characterId, preset, worldBooks, regexes)
+    ? await buildCheckPhoneManifestMessages(characterId, preset, worldBooks, regexes, false)
     : await buildCheckPhoneAppMessages(characterId, targetAppId, preset, worldBooks, regexes, {
         snapshotSummary,
         lastRefreshAt: snapshot?.updatedAt ?? "",
+        recordMemoryRecall: false,
       });
   return {
     messages: previewMessagesForApi(apiConfig, preset, messages),
@@ -1174,7 +1179,7 @@ async function buildCheckPhoneAppMessages(
   preset: PresetConfig | null,
   worldBooks: WorldBookConfig[],
   regexes: RegexConfig[],
-  options?: { snapshotSummary?: string; lastRefreshAt?: string },
+  options?: { snapshotSummary?: string; lastRefreshAt?: string; recordMemoryRecall?: boolean },
 ): Promise<LLMMessage[]> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) throw new Error("角色不存在");
@@ -1204,6 +1209,9 @@ async function buildCheckPhoneAppMessages(
     scheduleSummary: buildCalendarScheduleMarker("character", characterId, getWeekStartIso(new Date())),
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
+    onLongTermMemoriesInjected: options?.recordMemoryRecall !== false && memories
+      ? createMemoryRecallCallback(characterId, memories.map(entry => entry.id))
+      : undefined,
     worldBookActivationContext: wbActivationContext,
     recentBlocks,
     unifiedRecentItems,

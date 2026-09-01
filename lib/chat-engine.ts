@@ -54,7 +54,7 @@ import {
 import { setDebugPromptSnapshot, type DebugPromptSnapshot } from "./debug-store";
 import { extractFinishReason } from "./api-helpers";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { parseActionTags, dispatchActions } from "./action-parser";
@@ -381,6 +381,7 @@ type ChatPromptBuildOptions = {
     activateAllWorldBooks?: boolean;
     toolsAllowed?: boolean;
     forceEnableTools?: boolean;
+    recordMemoryRecall?: boolean;
 };
 
 function matchesPromptProfileRef(prompt: { identifier: string; name?: string }, refs: Set<string>): boolean {
@@ -1925,6 +1926,9 @@ export async function buildChatPromptMessages(
         currentSchedule,
         coreMemories,
         longTermMemories,
+        onLongTermMemoriesInjected: options?.recordMemoryRecall !== false && memResults
+            ? createMemoryRecallCallback(character.id, memResults.map(entry => entry.id))
+            : undefined,
         worldBookActivationContext: options?.worldBookActivationContext || wbActivationContext,
         activateAllWorldBooks: options?.activateAllWorldBooks,
         recentBlocks,
@@ -2767,7 +2771,11 @@ export async function previewPromptPayload(
     }
 
     // Use the SAME shared builder as generateChatCompletion
-    const { llmMessages, character, config, preset } = await buildChatPromptMessages(session, effectiveHistory, options);
+    const { llmMessages, character, config, preset } = await buildChatPromptMessages(
+        session,
+        effectiveHistory,
+        { ...options, recordMemoryRecall: false },
+    );
 
     const apiMessages = previewMessagesForApi(config, preset, llmMessages);
 
@@ -2828,7 +2836,11 @@ export async function previewPromptRequestSnapshot(
         effectiveHistory = annotated;
     }
 
-    const { llmMessages, character, config, preset, userIdentity, toolsEnabled } = await buildChatPromptMessages(session, effectiveHistory, options);
+    const { llmMessages, character, config, preset, userIdentity, toolsEnabled } = await buildChatPromptMessages(
+        session,
+        effectiveHistory,
+        { ...options, recordMemoryRecall: false },
+    );
     const requestMessages = toLlmRequestMessages(llmMessages);
     const enabledTools = toolsEnabled ? getEnabledTools(options?.appId ?? "chat") : [];
     const meta = { characterName: character.name, userName: userIdentity?.name };

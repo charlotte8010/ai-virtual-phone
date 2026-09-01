@@ -14,7 +14,7 @@ import {
 import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { previewMessagesForApi, sendLLMRequest } from "./chat-engine";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { buildCalendarScheduleMarker } from "./calendar-storage";
@@ -52,6 +52,7 @@ async function buildDwellingMessages(
     appTags: string[],
     dwellingContext?: string,
     macros?: { dwellingRoom?: string; dwellingFurniture?: string; dwellingItem?: string; dwellingItemPreview?: string },
+    recordMemoryRecall = true,
 ): Promise<LLMMessage[]> {
     const character = loadCharacters().find(c => c.id === characterId);
     if (!character) throw new Error("角色不存在");
@@ -80,6 +81,9 @@ async function buildDwellingMessages(
         scheduleSummary: buildCalendarScheduleMarker("character", characterId, getWeekStartIso(new Date())),
         coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
         longTermMemories: memories ? formatLongTermMemories(memories) : "",
+        onLongTermMemoriesInjected: recordMemoryRecall && memories
+            ? createMemoryRecallCallback(characterId, memories.map(entry => entry.id))
+            : undefined,
         worldBookActivationContext: wbActivationContext,
         recentBlocks,
         unifiedRecentItems,
@@ -355,8 +359,9 @@ export async function previewDwellingPromptPayload(
                 dwellingItem: cached?.layout.rooms[0]?.furniture[0]?.items[0]?.name ?? "物品",
                 dwellingItemPreview: cached?.layout.rooms[0]?.furniture[0]?.items[0]?.preview ?? "物品外观与细节",
             },
+            false,
         )
-        : await buildDwellingMessages(characterId, preset, worldBooks, regexes, appTags, dwellingContext);
+        : await buildDwellingMessages(characterId, preset, worldBooks, regexes, appTags, dwellingContext, undefined, false);
 
     return {
         messages: previewMessagesForApi(apiConfig, preset, llmMessages),

@@ -37,7 +37,7 @@ import {
 } from "./settings-storage";
 import type { PresetConfig, ApiConfig } from "./settings-types";
 import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { maybeRunSummarization } from "./memory-summarizer";
 import { assemblePromptPayload, type LLMMessage, type AssemblerInput } from "./llm-prompt-assembler";
@@ -180,7 +180,8 @@ function buildMomentsBilingualInstruction(enabled: boolean, customPrompt?: strin
  */
 async function resolveAssemblerInput(
     characterId: string,
-    task: "post" | "comment" | "npc" | "npc_reply" | "reply"
+    task: "post" | "comment" | "npc" | "npc_reply" | "reply",
+    options?: { recordMemoryRecall?: boolean },
 ): Promise<AssemblerResult | null> {
     const chars = loadCharacters();
     const character = chars.find(c => c.id === characterId);
@@ -220,6 +221,7 @@ async function resolveAssemblerInput(
     // 7. Load long-term memories (NPC doesn't share the character's memory)
     let coreMemories = "";
     let longTermMemories = "";
+    let onLongTermMemoriesInjected: (() => void) | undefined;
     const memConfig = loadMemoryConfig();
     if (task !== "npc") {
         try {
@@ -234,6 +236,9 @@ async function resolveAssemblerInput(
             ]);
                 coreMemories = formatCoreMemories(coreResults);
             longTermMemories = formatLongTermMemories(results);
+            if (options?.recordMemoryRecall !== false) {
+                onLongTermMemoriesInjected = createMemoryRecallCallback(characterId, results.map(entry => entry.id));
+            }
         } catch (err) {
             console.warn("[Moments] Memory retrieval failed:", err);
         }
@@ -272,6 +277,7 @@ async function resolveAssemblerInput(
         appTags,
         coreMemories,
         longTermMemories,
+        onLongTermMemoriesInjected,
         scheduleSummary,
         worldBookActivationContext: wbActivationContext,
         activateAllWorldBooks: false,
@@ -1537,7 +1543,7 @@ export type MomentsPreviewResult = {
  * Uses the same assemblePromptPayload() pipeline as the actual generation.
  */
 export async function previewMomentsPostPrompt(characterId: string): Promise<MomentsPreviewResult | null> {
-    const resolved = await resolveAssemblerInput(characterId, "post");
+    const resolved = await resolveAssemblerInput(characterId, "post", { recordMemoryRecall: false });
     if (!resolved) return null;
 
     const { input, apiConfig, preset, character } = resolved;
@@ -1565,7 +1571,7 @@ export async function previewMomentsPostPrompt(characterId: string): Promise<Mom
  * Uses the same assemblePromptPayload() pipeline as the actual generation.
  */
 export async function previewMomentsCommentPrompt(characterId: string, postId: string): Promise<MomentsPreviewResult | null> {
-    const resolved = await resolveAssemblerInput(characterId, "comment");
+    const resolved = await resolveAssemblerInput(characterId, "comment", { recordMemoryRecall: false });
     if (!resolved) return null;
 
     const { input, apiConfig, preset, character } = resolved;
@@ -1614,7 +1620,7 @@ export async function previewMomentsNPCPrompt(characterId: string, postId: strin
  * Preview the prompt that would be sent for character reply on a specific post.
  */
 export async function previewMomentsReplyPrompt(characterId: string, postId: string): Promise<MomentsPreviewResult | null> {
-    const resolved = await resolveAssemblerInput(characterId, "reply");
+    const resolved = await resolveAssemblerInput(characterId, "reply", { recordMemoryRecall: false });
     if (!resolved) return null;
 
     const { input, apiConfig, preset, character } = resolved;

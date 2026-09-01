@@ -18,6 +18,7 @@ const mockSources = new Map([
     [resolve(repoRoot, "lib/memory-storage.ts"), `
         export function loadMemoryConfig() { return globalThis.__testConfig; }
         export async function loadMemoryEntriesByType() { return globalThis.__testMemories; }
+        export async function updateMemoryRecallStats() {}
     `],
     [resolve(repoRoot, "lib/settings-storage.ts"), `
         export function resolveAuxiliaryApiConfig() { return globalThis.__testEmbeddingConfig; }

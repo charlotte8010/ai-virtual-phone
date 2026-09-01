@@ -5,7 +5,7 @@ import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { loadBindingConfig, loadApiConfigs, loadPresets, loadWorldBooks, loadRegexes, resolveBinding, resolveUserIdentity } from "./settings-storage";
 import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./settings-types";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { formatDiaryEntryContext, parseDiaryEntryContent, type ParsedDiaryEntry } from "./diary-entry-utils";
@@ -24,6 +24,7 @@ type ResolvedDiaryEntryGeneration = {
 async function resolveDiaryEntryGeneration(
   characterId: string,
   entries: DiaryEntry[],
+  recordMemoryRecall = true,
 ): Promise<ResolvedDiaryEntryGeneration> {
   const character = loadCharacters().find(entry => entry.id === characterId);
   if (!character) throw new ChatEngineError("找不到要写日记的角色。");
@@ -71,6 +72,9 @@ async function resolveDiaryEntryGeneration(
     appId: "diary",
     appTags: ["diary", "entries"],
     longTermMemories: formatLongTermMemories(memories),
+    onLongTermMemoriesInjected: recordMemoryRecall
+      ? createMemoryRecallCallback(character.id, memories.map(entry => entry.id))
+      : undefined,
     coreMemories: formatCoreMemories(coreMemories),
     worldBookActivationContext: prepared.wbActivationContext,
     recentBlocks: prepared.recentBlocks,
@@ -109,7 +113,7 @@ export async function previewDiaryEntryPromptPayload(
   characterId: string,
   entries: DiaryEntry[],
 ): Promise<{ messages: LLMMessage[]; characterName: string; model: string; presetName: string }> {
-  const resolved = await resolveDiaryEntryGeneration(characterId, entries);
+  const resolved = await resolveDiaryEntryGeneration(characterId, entries, false);
   return {
     messages: previewMessagesForApi(resolved.apiConfig, resolved.preset, resolved.messages),
     characterName: `日记:${resolved.character.name}`,

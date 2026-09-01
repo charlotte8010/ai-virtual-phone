@@ -6,7 +6,7 @@ import { assemblePromptPayload, type AssemblerInput, type LLMContentPart, type L
 import { DEFAULT_XIAOHONGSHU_BILINGUAL_PROMPT, resolveBilingualPrompt } from "./bilingual-prompt-defaults";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { prepareShortTermContext } from "./short-term-assembler";
 import {
   loadApiConfigs,
@@ -1061,6 +1061,7 @@ async function resolveCharacterAssemblerInput(
     mentionContext?: string;
   },
   settings?: XiaohongshuSettings,
+  recordMemoryRecall = true,
 ): Promise<AssemblerResult | null> {
   const character = loadCharacters().find(item => item.id === characterId);
   if (!character) return null;
@@ -1095,6 +1096,9 @@ async function resolveCharacterAssemblerInput(
     appId: "xiaohongshu",
     appTags,
     longTermMemories: formatLongTermMemories(memories),
+    onLongTermMemoriesInjected: recordMemoryRecall
+      ? createMemoryRecallCallback(characterId, memories.map(entry => entry.id))
+      : undefined,
     coreMemories: formatCoreMemories(coreMemories),
     worldBookActivationContext: prepared.wbActivationContext,
     recentBlocks: prepared.recentBlocks,
@@ -1445,6 +1449,7 @@ export async function previewXiaohongshuPromptPayload(
     ["xiaohongshu", mode],
     context,
     settings,
+    false,
   );
   if (!resolved?.apiConfig) throw new ChatEngineError("未配置小红书 API。");
   const messages = assemblePromptPayload(resolved.input);

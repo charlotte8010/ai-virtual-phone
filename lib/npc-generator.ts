@@ -17,7 +17,7 @@ import {
 } from "./character-world-storage";
 import { loadMomentsConfig, saveMomentsConfig, loadMomentPosts, loadMomentComments } from "./moments-storage";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import type { Character } from "./character-types";
 
@@ -195,6 +195,7 @@ async function runGeneration(
     // 检索失败降级为不注入，不阻断生成。
     let coreMemories = "";
     let longTermMemories = "";
+    let onLongTermMemoriesInjected: (() => void) | undefined;
     try {
         const memConfig = loadMemoryConfig();
         const retrievalContext = `${character.name}的人际关系、家人、朋友、同事与生活圈。${hint.trim()}`;
@@ -204,11 +205,13 @@ async function runGeneration(
         ]);
         coreMemories = formatCoreMemories(coreResults);
         longTermMemories = formatLongTermMemories(longTermResults);
+        onLongTermMemoriesInjected = createMemoryRecallCallback(targetCharacterId, longTermResults.map(entry => entry.id));
     } catch (err) {
         console.warn("[NpcGenerator] memory retrieval failed:", err);
     }
 
     const systemPrompt = buildSystemPrompt(character, buildWorldContext(character), coreMemories, longTermMemories, options);
+    if (longTermMemories.trim()) onLongTermMemoriesInjected?.();
     const trimmedHint = hint.trim();
     const userPrompt = options.fixedName
         ? `请为对话中提到的「${options.fixedName}」生成完整档案。${trimmedHint}`

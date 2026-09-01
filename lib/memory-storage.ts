@@ -6,6 +6,7 @@ import { DEFAULT_MEMORY_CONFIG } from "./memory-types";
 import { kvGet, kvSet, registerKvMigration, registerDynamicPrefix } from "./kv-db";
 import { openIndexedDbAtLeast } from "./idb-open";
 import { normalizeMemoryEntry } from "./memory-compat";
+import { applyRecallStats } from "./memory-recall-stats";
 import type { FutureIntentEvent } from "./future-intent-detector";
 import { dbWaitForMessagePersistence } from "./chat-db";
 
@@ -101,6 +102,42 @@ export async function loadMemoryEntriesByType(
 ): Promise<MemoryEntry[]> {
     const entries = await loadMemoryEntries(characterId);
     return entries.filter(entry => entry.type === type);
+}
+
+/** Update selected long-term memories atomically after they were injected into a prompt. */
+export async function updateMemoryRecallStats(
+    characterId: string,
+    memoryIds: readonly string[],
+    recalledAt: string,
+): Promise<void> {
+    const selectedIds = new Set(memoryIds);
+    if (selectedIds.size === 0) return;
+
+    const db = await openDb();
+    if (!db) {
+        if (hasBrowserApi()) throw new Error("Memory database is unavailable");
+        return;
+    }
+    try {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        const entries = await runRequest(
+            store.index("by_character_type").getAll([characterId, "long_term"]),
+        ) as MemoryEntry[];
+        for (const entry of entries) {
+            if (entry.characterId !== characterId || entry.type !== "long_term" || !selectedIds.has(entry.id)) {
+                continue;
+            }
+            store.put(applyRecallStats(normalizeMemoryEntry(entry), recalledAt));
+        }
+        await new Promise<void>((resolve, reject) => {
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error ?? new Error("Memory recall stats transaction failed"));
+            tx.onabort = () => reject(tx.error ?? new Error("Memory recall stats transaction aborted"));
+        });
+    } finally {
+        db.close();
+    }
 }
 
 export async function deleteMemoryEntry(id: string): Promise<void> {

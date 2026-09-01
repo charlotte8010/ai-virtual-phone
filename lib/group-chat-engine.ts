@@ -61,7 +61,7 @@ import {
     resolveStatusRegionFullExample,
 } from "./chat-status-region";
 import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { maybeRunSummarization } from "./memory-summarizer";
 import { prepareShortTermContext, prepareGroupShortTermContext } from "./short-term-assembler";
@@ -292,6 +292,7 @@ export type GroupChatPromptBuildOptions = {
     disableTools?: boolean;
     promptProfile?: CustomAppPromptProfile | null;
     apiConfigId?: string;
+    recordMemoryRecall?: boolean;
 };
 
 async function buildGroupChatPromptMessages(
@@ -358,6 +359,7 @@ async function buildGroupChatPromptMessages(
             promptTimestampOptions: getPromptTimestampOptionsForTimeContext(memberTimeContext),
         });
         let coreMemories = "", longTermMemories = "";
+        let onLongTermMemoriesInjected: (() => void) | undefined;
         try {
             const [coreResults, results] = await Promise.all([
                 retrieveCoreMemoriesForPrompt(charId, memConfig),
@@ -365,6 +367,9 @@ async function buildGroupChatPromptMessages(
             ]);
             coreMemories = formatCoreMemories(coreResults);
             longTermMemories = formatLongTermMemories(results);
+            if (options?.recordMemoryRecall !== false) {
+                onLongTermMemoriesInjected = createMemoryRecallCallback(charId, results.map(entry => entry.id));
+            }
         } catch { /* ignore */ }
         return {
             character,
@@ -373,6 +378,7 @@ async function buildGroupChatPromptMessages(
             currentSchedule,
             coreMemories,
             longTermMemories,
+            onLongTermMemoriesInjected,
             currentStateValues: getLatestCharacterStateValues(charId),
         };
     });
@@ -1097,7 +1103,11 @@ export async function previewGroupPromptPayload(
     history: ChatMessage[],
 ): Promise<{ messages: LLMMessage[]; characterName: string; model: string; presetName: string }> {
     // Use the SAME shared builder as generateGroupChatCompletion
-    const { llmMessages, config, preset } = await buildGroupChatPromptMessages(session, history);
+    const { llmMessages, config, preset } = await buildGroupChatPromptMessages(
+        session,
+        history,
+        { recordMemoryRecall: false },
+    );
 
     const apiMessages = previewMessagesForApi(config, preset, llmMessages);
 
@@ -1114,7 +1124,11 @@ export async function previewGroupPromptRequestSnapshot(
     history: ChatMessage[],
     options?: GroupChatPromptBuildOptions,
 ): Promise<DebugPromptSnapshot> {
-    const { llmMessages, config, preset, memberNames, enabledTools, userName, appTags } = await buildGroupChatPromptMessages(session, history, options);
+    const { llmMessages, config, preset, memberNames, enabledTools, userName, appTags } = await buildGroupChatPromptMessages(
+        session,
+        history,
+        { ...options, recordMemoryRecall: false },
+    );
     const requestMessages = toLlmRequestMessages(llmMessages);
     const meta = { characterName: `群聊:${session.groupName || "群聊"}`, userName };
 

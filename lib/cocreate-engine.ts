@@ -2,7 +2,7 @@ import { loadCharacters } from "./character-storage";
 import { previewMessagesForApi, sendLLMRequest, sendLLMStreamRequest, sendLLMToolRequest, sendLLMToolStreamRequest, ChatEngineError } from "./chat-engine";
 import type { ChatMessage } from "./chat-storage";
 import { assemblePromptPayload } from "./llm-prompt-assembler";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
+import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
 import { prepareShortTermContext } from "./short-term-assembler";
@@ -512,6 +512,9 @@ export async function generateCoCreateReply(
     appId: COCREATE_APP_ID,
     appTags,
     longTermMemories: memories ? formatLongTermMemories(memories) : "",
+    onLongTermMemoriesInjected: memories
+      ? createMemoryRecallCallback(runtime.character.id, memories.map(entry => entry.id))
+      : undefined,
     coreMemories: coreMemories ? formatCoreMemories(coreMemories) : "",
     scheduleSummary: buildCalendarScheduleMarker("character", runtime.character.id, getWeekStartIso(new Date())),
     worldBookActivationContext: cocreateActivationContext,

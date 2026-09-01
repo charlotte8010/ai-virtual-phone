@@ -63,6 +63,8 @@ export interface AssemblerInput {
     scheduleSummary?: string;
     currentSchedule?: string;
     longTermMemories?: string;
+    /** Called after a non-empty memoryLongTerm marker reaches the final payload. */
+    onLongTermMemoriesInjected?: () => void;
     coreMemories?: string;
     worldBookActivationContext?: string;  // override history-based keyword activation context
     activateAllWorldBooks?: boolean;      // true = skip keyword matching, activate all non-disabled entries
@@ -620,6 +622,7 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
     const periodCareContext = input.periodCareContext ?? "";
     const resolvedUserName = userIdentity?.name || userName;
     const blocks: PromptBlock[] = [];
+    let longTermMemoryInjected = false;
     const timeAware = resolveTimeAware(input.timeAware);
     const promptTimeContext = input.timeContext ?? buildCharacterTimeContext(character.timeZone);
     const promptTimestampOptions = input.promptTimestampOptions
@@ -739,7 +742,6 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
         let afterOrderIdx = 0;
         const beforeHistoryDepth = resolveBeforeHistoryDepth(history.length, input.unifiedRecentItems?.length);
         const absoluteEntries: { prompt: Prompt; content: string; promptIndex: number }[] = [];
-
         for (let promptIndex = 0; promptIndex < processingOrder.length; promptIndex += 1) {
             const p = processingOrder[promptIndex];
 
@@ -775,6 +777,7 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                     markerContent = engine.expand(markerContent);
                     markerContent = postProcessTrim(markerContent).trim();
                     if (markerContent) {
+                        if (p.identifier === "memoryLongTerm") longTermMemoryInjected = true;
                         const xmlText = wrapXml(toXmlTag(p.identifier), markerContent);
                         if (afterChatHistory) {
                             blocks.push({
@@ -1121,6 +1124,14 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                 marker: mergeMarkerText(prev._debugMeta?.marker, cur._debugMeta?.marker),
             };
             finalPayload.splice(i, 1);
+        }
+    }
+
+    if (longTermMemoryInjected && input.onLongTermMemoriesInjected) {
+        try {
+            input.onLongTermMemoriesInjected();
+        } catch (error) {
+            console.warn("[PromptAssembler] Recall stats callback failed; continuing with prompt", error);
         }
     }
 
@@ -1561,6 +1572,8 @@ export interface GroupMemberData {
     currentSchedule?: string;
     coreMemories?: string;
     longTermMemories?: string;
+    /** Called after this member's long-term memory marker reaches the final payload. */
+    onLongTermMemoriesInjected?: () => void;
     currentStateValues?: StateValue[];
     characterRelations?: string;
 }
@@ -1786,6 +1799,7 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
     const isSharedBook = (id: string): boolean => (bookBinderIds.get(id)?.size ?? 0) >= 2;
     const atDepthInjections: { entry: WorldBookEntry; engine: MacroEngine }[] = [];
     const sharedAfterBlocks: { text: string; marker: string }[] = [];
+    const longTermMemoryCallbacks: Array<() => void> = [];
 
     const seenSharedBooks = new Set<string>();
     for (const m of members) {
@@ -1880,6 +1894,7 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
 
         // Build member content by iterating preset markers in order
         const sections: string[] = [];
+        let longTermMemoryInjected = false;
 
         if (preset) {
             for (const p of processingOrder) {
@@ -1908,6 +1923,7 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                     markerContent = engine.expand(markerContent);
                     markerContent = postProcessTrim(markerContent).trim();
                     if (markerContent) {
+                        if (p.identifier === "memoryLongTerm") longTermMemoryInjected = true;
                         sections.push(markerContent);
                     }
                 }
@@ -1928,6 +1944,9 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                 order: orderIdx++,
                 marker: `member:${char.name}`,
             });
+        }
+        if (longTermMemoryInjected && m.onLongTermMemoriesInjected) {
+            longTermMemoryCallbacks.push(m.onLongTermMemoriesInjected);
         }
     }
 
@@ -2264,6 +2283,14 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                 marker: mergeMarkerText(prev._debugMeta?.marker, cur._debugMeta?.marker),
             };
             finalPayload.splice(i, 1);
+        }
+    }
+
+    for (const callback of longTermMemoryCallbacks) {
+        try {
+            callback();
+        } catch (error) {
+            console.warn("[GroupPromptAssembler] Recall stats callback failed; continuing with prompt", error);
         }
     }
 
