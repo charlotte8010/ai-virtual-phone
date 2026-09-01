@@ -7,6 +7,7 @@ import type { DiaryEntry } from "../../diary-entry-types";
 import type { CalendarWeekPlan } from "../../calendar-types";
 import type { WorldBookConfig } from "../../settings-types";
 import type { MemoryEntry } from "../../memory-types";
+import type { MemoryLink } from "../../memory-types";
 import type { UserIdentity } from "../../../components/settings/user-identity";
 import type {
   FloatMigrationManifest,
@@ -21,7 +22,7 @@ import type {
 export type NativeMigrationDomain =
   | "identities" | "characters" | "contacts" | "sessions" | "messages" | "media"
   | "moments" | "momentComments" | "diaries" | "worlds" | "worldbooks" | "calendar"
-  | "memories" | "storySessions" | "storyMessages" | "archive" | "idMap";
+  | "memories" | "memoryLinks" | "storySessions" | "storyMessages" | "archive" | "idMap";
 
 export type MigrationDecision = "create" | "reuse" | "skip" | "conflict" | "failed";
 
@@ -94,6 +95,8 @@ export interface NativeMigrationPlan {
   worldbooks: WorldBookConfig[];
   calendar: CalendarWeekPlan[];
   memories: MemoryEntry[];
+  memoryLinks: MemoryLink[];
+  memoryLinkAudit: import("./memory-links").NativeMemoryLinkAudit;
   activeMemoryPalaceCount: number;
   legacyCoreMemoryCount: number;
   activeFutureIntentCount: number;
@@ -120,6 +123,7 @@ export interface NativeMigrationSnapshot {
   worldbooks: WorldBookConfig[];
   calendar: CalendarWeekPlan[];
   memories: MemoryEntry[];
+  memoryLinks?: MemoryLink[];
   archive?: NativeMigrationArchive;
   idMap?: Record<string, Record<string, string>>;
 }
@@ -145,6 +149,7 @@ export interface NativeMigrationReconciliation {
   worldbooks: DomainReconciliation<WorldBookConfig>;
   calendar: DomainReconciliation<CalendarWeekPlan>;
   memories: DomainReconciliation<MemoryEntry>;
+  memoryLinks: DomainReconciliation<MemoryLink>;
   storySessions: DomainReconciliation<StorySession>;
   storyMessages: DomainReconciliation<StoryMessage>;
   archive: "create" | "reuse" | "conflict";
@@ -189,6 +194,8 @@ export interface NativeMigrationDryRun {
     activeFutureIntents: number;
     archivedWindowsill: number;
     memoryLinks: number;
+    activeMemoryLinks: number;
+    archiveOnlyMemoryLinks: number;
     legacyCoreSummaries: number;
     timelineRecords: number;
   };

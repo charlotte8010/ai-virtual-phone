@@ -10,8 +10,8 @@ import type { DiaryEntry } from "../../diary-entry-types";
 import type { CharacterWorldGroup } from "../../character-world-storage";
 import type { WorldBookConfig } from "../../settings-types";
 import type { CalendarWeekPlan } from "../../calendar-types";
-import type { MemoryEntry } from "../../memory-types";
-import { deleteMemoryEntries, loadMemoryEntries, saveMemoryEntry } from "../../memory-storage";
+import type { MemoryEntry, MemoryLink } from "../../memory-types";
+import { deleteMemoryEntries, deleteMemoryLinks, loadMemoryEntries, loadMemoryLinks, saveMemoryEntries, saveMemoryLinks } from "../../memory-storage";
 import { isKvHydrated, kvGet, kvRemove, kvSetAsync } from "../../kv-db";
 import { listMediaCacheSummaries } from "../../media-cache-storage";
 import type { UserIdentity } from "../../../components/settings/user-identity";
@@ -181,10 +181,15 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
     settingsDb.close();
     storyDb.close();
 
-    const memoryCharacterIds = [...new Set(plan.memories.map((entry) => entry.characterId))];
+    const memoryCharacterIds = [...new Set([
+      ...plan.memories.map((entry) => entry.characterId),
+      ...plan.memoryLinks.map((entry) => entry.characterId),
+    ])];
     const memories: MemoryEntry[] = [];
+    const memoryLinks: MemoryLink[] = [];
     for (const characterId of memoryCharacterIds) {
       memories.push(...await loadMemoryEntries(characterId));
+      memoryLinks.push(...await loadMemoryLinks(characterId));
     }
 
     return {
@@ -203,6 +208,7 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
       worldbooks,
       calendar: Array.isArray(calendarStore?.plans) ? calendarStore.plans : [],
       memories,
+      memoryLinks,
       archive: parseObject<NativeMigrationArchive>(kvGet(archiveKey(plan.sourceFingerprint))),
       idMap: parseObject<Record<string, Record<string, string>>>(kvGet(idMapKey(plan.sourceFingerprint))),
     };
@@ -307,10 +313,12 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
       }
 
       if (reconciliation.memories.create.length) {
-        for (const entry of reconciliation.memories.create) {
-          await saveMemoryEntry(entry);
-        }
+        await saveMemoryEntries(reconciliation.memories.create, { suppressMemoryLinkLifecycle: true });
         created.memories = ids(reconciliation.memories.create, (entry) => entry.id);
+      }
+      if (reconciliation.memoryLinks.create.length) {
+        await saveMemoryLinks(reconciliation.memoryLinks.create);
+        created.memoryLinks = ids(reconciliation.memoryLinks.create, (entry) => entry.id);
       }
 
       if (reconciliation.archive === "create") {
@@ -393,6 +401,9 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
       if (journal.created.memories?.length) {
         await deleteMemoryEntries(journal.created.memories);
       }
+      if (journal.created.memoryLinks?.length) {
+        await deleteMemoryLinks(journal.created.memoryLinks);
+      }
 
       const durableKv = new MigrationKvDatabase();
       for (const key of [...(journal.created.archive ?? []), ...(journal.created.idMap ?? [])]) {
@@ -425,6 +436,7 @@ class IsolatedMigrationDatabase extends Dexie {
   worldbooks!: Table<WorldBookConfig, string>;
   calendar!: Table<CalendarWeekPlan, string>;
   memories!: Table<MemoryEntry, string>;
+  memoryLinks!: Table<MemoryLink, string>;
   meta!: Table<{ key: string; value: string }, string>;
 
   constructor(name: string) {
@@ -445,6 +457,7 @@ class IsolatedMigrationDatabase extends Dexie {
       worldbooks: "id",
       calendar: "id, ownerId, weekStart",
       memories: "id, characterId, type",
+      memoryLinks: "id, characterId, fromMemoryId, toMemoryId, type",
       meta: "key",
     });
   }
@@ -476,6 +489,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
     if (snapshot.worldbooks?.length) await this.db.worldbooks.bulkPut(snapshot.worldbooks);
     if (snapshot.calendar?.length) await this.db.calendar.bulkPut(snapshot.calendar);
     if (snapshot.memories?.length) await this.db.memories.bulkPut(snapshot.memories);
+    if (snapshot.memoryLinks?.length) await this.db.memoryLinks.bulkPut(snapshot.memoryLinks);
   }
 
   async saveJournal(journal: MigrationRunJournal): Promise<void> {
@@ -490,7 +504,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
   async readSnapshot(plan: NativeMigrationPlan): Promise<NativeMigrationSnapshot> {
     const [
       identities, characters, contacts, sessions, messages, storySessions, storyMessages, media, moments, momentComments,
-      diaries, worlds, worldbooks, calendar, memories, archiveRow, idMapRow,
+      diaries, worlds, worldbooks, calendar, memories, memoryLinks, archiveRow, idMapRow,
     ] = await Promise.all([
       this.db.identities.toArray(),
       this.db.characters.toArray(),
@@ -507,6 +521,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
       this.db.worldbooks.toArray(),
       this.db.calendar.toArray(),
       this.db.memories.toArray(),
+      this.db.memoryLinks.toArray(),
       this.db.meta.get(archiveKey(plan.sourceFingerprint)),
       this.db.meta.get(idMapKey(plan.sourceFingerprint)),
     ]);
@@ -527,6 +542,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
       worldbooks,
       calendar,
       memories,
+      memoryLinks,
       archive: archiveRow ? JSON.parse(archiveRow.value) as NativeMigrationArchive : undefined,
       idMap: idMapRow ? JSON.parse(idMapRow.value) as Record<string, Record<string, string>> : undefined,
     };
@@ -548,7 +564,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
           this.db.identities, this.db.characters, this.db.contacts, this.db.sessions, this.db.messages,
           this.db.storySessions, this.db.storyMessages,
           this.db.moments, this.db.momentComments, this.db.diaries, this.db.worlds, this.db.worldbooks,
-          this.db.calendar, this.db.memories, this.db.meta,
+          this.db.calendar, this.db.memories, this.db.memoryLinks, this.db.meta,
         ],
         async () => {
           const put = async <T extends { id: string }>(table: Table<T, string>, values: T[], domain: keyof typeof created): Promise<void> => {
@@ -571,6 +587,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
           await put(this.db.worldbooks, reconciliation.worldbooks.create, "worldbooks");
           await put(this.db.calendar, reconciliation.calendar.create, "calendar");
           await put(this.db.memories, reconciliation.memories.create, "memories");
+          await put(this.db.memoryLinks, reconciliation.memoryLinks.create, "memoryLinks");
 
           if (reconciliation.archive === "create") {
             const key = archiveKey(plan.sourceFingerprint);
@@ -624,7 +641,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
           this.db.identities, this.db.characters, this.db.contacts, this.db.sessions, this.db.messages,
           this.db.storySessions, this.db.storyMessages,
           this.db.media, this.db.moments, this.db.momentComments, this.db.diaries, this.db.worlds,
-          this.db.worldbooks, this.db.calendar, this.db.memories, this.db.meta,
+          this.db.worldbooks, this.db.calendar, this.db.memories, this.db.memoryLinks, this.db.meta,
         ],
         async () => {
           const del = async <T>(table: Table<T, string>, values?: string[]): Promise<void> => {
@@ -646,6 +663,7 @@ export class IsolatedBrowserNativeMigrationStorage implements NativeMigrationSto
           await del(this.db.worldbooks, journal.created.worldbooks);
           await del(this.db.calendar, journal.created.calendar);
           await del(this.db.memories, journal.created.memories);
+          await del(this.db.memoryLinks, journal.created.memoryLinks);
 
           for (const key of [...(journal.created.archive ?? []), ...(journal.created.idMap ?? [])]) {
             await this.db.meta.delete(key);

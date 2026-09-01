@@ -5,6 +5,8 @@ import type {
   NativeMigrationSnapshot,
   NativeMediaImport,
 } from "./types";
+import type { MemoryLink } from "../../memory-types";
+import { memoryLinkSemanticKey } from "./memory-links";
 
 function stableValue(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableValue).join(",")}]`;
@@ -56,6 +58,52 @@ function totalsOf(parts: Array<DomainReconciliation<unknown>>): NativeMigrationR
   }), { create: 0, reuse: 0, skip: 0, conflicts: 0 });
 }
 
+function reconcileMemoryLinks(
+  planned: NativeMigrationPlan["memoryLinks"],
+  existing: NativeMigrationSnapshot["memoryLinks"],
+): { reconciliation: NativeMigrationReconciliation["memoryLinks"]; actualIdByPlannedId: Map<string, string> } {
+  const existingById = new Map((existing ?? []).map((value) => [value.id, value]));
+  const existingBySemanticKey = new Map<string, MemoryLink>();
+  for (const value of existing ?? []) {
+    const key = memoryLinkSemanticKey(value);
+    if (!existingBySemanticKey.has(key)) existingBySemanticKey.set(key, value);
+  }
+  const create: MemoryLink[] = [];
+  const reuse: MemoryLink[] = [];
+  const skip: MemoryLink[] = [];
+  const conflicts: Array<{ planned: MemoryLink; existing: MemoryLink; reason: string }> = [];
+  const actualIdByPlannedId = new Map<string, string>();
+  const seen = new Set<string>();
+
+  for (const value of planned) {
+    if (!value.id || seen.has(value.id)) {
+      skip.push(value);
+      continue;
+    }
+    seen.add(value.id);
+    const byId = existingById.get(value.id);
+    if (byId) {
+      if (stableValue(byId) === stableValue(value)) {
+        reuse.push(byId);
+        actualIdByPlannedId.set(value.id, byId.id);
+      } else {
+        conflicts.push({ planned: value, existing: byId, reason: `target id ${value.id} already exists with different content` });
+        actualIdByPlannedId.set(value.id, value.id);
+      }
+      continue;
+    }
+    const semanticMatch = existingBySemanticKey.get(memoryLinkSemanticKey(value));
+    if (semanticMatch) {
+      reuse.push(semanticMatch);
+      actualIdByPlannedId.set(value.id, semanticMatch.id);
+      continue;
+    }
+    create.push(value);
+    actualIdByPlannedId.set(value.id, value.id);
+  }
+  return { reconciliation: { create, reuse, skip, conflicts }, actualIdByPlannedId };
+}
+
 function reconcileStorySessions(
   planned: NativeMigrationPlan["storySessions"],
   existing: NativeMigrationSnapshot["storySessions"],
@@ -101,6 +149,7 @@ function reconcileStorySessions(
 function resolveIdMap(
   planned: NativeMigrationPlan["idMap"],
   storySessionIds: Map<string, string>,
+  memoryLinkIds: Map<string, string>,
 ): NativeMigrationPlan["idMap"] {
   const resolved = Object.fromEntries(Object.entries(planned).map(([bucket, values]) => [bucket, { ...values }])) as NativeMigrationPlan["idMap"];
   const plannedStorySessions = resolved.storySessions;
@@ -108,6 +157,13 @@ function resolveIdMap(
     resolved.storySessions = Object.fromEntries(Object.entries(plannedStorySessions).map(([sourceId, plannedId]) => [
       sourceId,
       storySessionIds.get(plannedId) ?? plannedId,
+    ]));
+  }
+  const plannedMemoryLinks = resolved.memoryLinks;
+  if (plannedMemoryLinks) {
+    resolved.memoryLinks = Object.fromEntries(Object.entries(plannedMemoryLinks).map(([sourceId, plannedId]) => [
+      sourceId,
+      memoryLinkIds.get(plannedId) ?? plannedId,
     ]));
   }
   return resolved;
@@ -162,6 +218,8 @@ export function reconcileNativeMigrationPlan(plan: NativeMigrationPlan, existing
   const worldbooks = reconcileRecords(plan.worldbooks, existing.worldbooks, (entry) => entry.id);
   const calendar = reconcileRecords(plan.calendar, existing.calendar, (entry) => entry.id);
   const memories = reconcileRecords(plan.memories, existing.memories, (entry) => entry.id);
+  const memoryLinkResult = reconcileMemoryLinks(plan.memoryLinks, existing.memoryLinks ?? []);
+  const memoryLinks = memoryLinkResult.reconciliation;
   const storySessionResult = reconcileStorySessions(plan.storySessions, existing.storySessions);
   const remappedStoryMessages = plan.storyMessages.map((message) => {
     const sessionId = storySessionResult.actualIdByPlannedId.get(message.sessionId);
@@ -170,7 +228,7 @@ export function reconcileNativeMigrationPlan(plan: NativeMigrationPlan, existing
   });
   const storyMessages = reconcileRecords(remappedStoryMessages, existing.storyMessages, (entry) => entry.id);
   const storySessions = protectNewStorySessionPointers(storySessionResult.reconciliation, storyMessages);
-  const resolvedIdMap = resolveIdMap(plan.idMap, storySessionResult.actualIdByPlannedId);
+  const resolvedIdMap = resolveIdMap(plan.idMap, storySessionResult.actualIdByPlannedId, memoryLinkResult.actualIdByPlannedId);
   const archive = existing.archive === undefined
     ? "create"
     : stableValue(existing.archive) === stableValue(plan.archive) ? "reuse" : "conflict";
@@ -179,7 +237,7 @@ export function reconcileNativeMigrationPlan(plan: NativeMigrationPlan, existing
     : stableValue(existing.idMap) === stableValue(resolvedIdMap) ? "reuse" : "conflict";
   const parts: Array<DomainReconciliation<unknown>> = [
     identities, characters, contacts, sessions, messages, media, moments, momentComments,
-    diaries, worlds, worldbooks, calendar, memories, storySessions, storyMessages,
+    diaries, worlds, worldbooks, calendar, memories, memoryLinks, storySessions, storyMessages,
   ];
   const totals = totalsOf(parts);
   totals.create += archive === "create" ? 1 : 0;
@@ -190,7 +248,7 @@ export function reconcileNativeMigrationPlan(plan: NativeMigrationPlan, existing
   totals.conflicts += idMap === "conflict" ? 1 : 0;
   return {
     identities, characters, contacts, sessions, messages, media, moments, momentComments, diaries,
-    worlds, worldbooks, calendar, memories,
+    worlds, worldbooks, calendar, memories, memoryLinks,
     storySessions,
     storyMessages,
     archive, idMap, resolvedIdMap, totals,

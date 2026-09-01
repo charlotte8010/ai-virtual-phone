@@ -8,6 +8,7 @@ try {
   const { buildNativeMigrationPlan } = runtime.requireModule("native/mapper.js");
   const { deterministicNativeId } = runtime.requireModule("native/id.js");
   const { reconcileNativeMigrationPlan } = runtime.requireModule("native/reconcile.js");
+  const { dryRunFloatMigrationPackage } = runtime.requireModule("native/importer.js");
   const storageSource = await readFile(new URL("../lib/migrations/native/storage.ts", import.meta.url), "utf8");
 
   const fingerprint = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -62,12 +63,56 @@ try {
     invalidStrength: 0,
     invalidType: 0,
     invalidStrengthSamples: [],
-    sourceTypeCounts: { emotional: 1, temporal: 3, future_custom_relation: 1 },
+      sourceTypeCounts: { emotional: 1, temporal: 4, future_custom_relation: 1 },
     activeTypeCounts: { emotion: 1, temporal: 1, future_custom_relation: 1 },
   });
   assert.equal(plan.memoryLinks.find((link) => link.id === plan.idMap.memoryLinks["link-emotion"]).type, "emotion");
   assert.equal(plan.memoryLinks.find((link) => link.id === plan.idMap.memoryLinks["link-future"]).type, "future_custom_relation");
   assert.equal(plan.memoryLinks.find((link) => link.id === plan.idMap.memoryLinks["link-emotion"]).strength, 0.4);
+
+  const terminalPayload = structuredClone(payload);
+  terminalPayload.futureIntents = [{
+    migrationId: "intent-terminal",
+    characterRef: "char-a",
+    content: "已经完成的计划",
+    timePrecision: "unknown",
+    status: "fulfilled",
+    sourceMemoryRef: "memory-c",
+    source: source("futureIntents", "terminal"),
+  }];
+  const terminalPlan = buildNativeMigrationPlan(manifest, terminalPayload, []);
+  assert.equal(terminalPlan.memories.find((entry) => entry.metadata?.migrationId === "memory-c").futureIntent?.status, "fulfilled");
+  assert.equal(terminalPlan.memoryLinks.some((link) => link.fromMemoryId === terminalPlan.idMap.memories["memory-a"] && link.toMemoryId === terminalPlan.idMap.memories["memory-c"]), false);
+  assert.equal(terminalPlan.memoryLinks.some((link) => link.fromMemoryId === terminalPlan.idMap.memories["memory-b"] && link.toMemoryId === terminalPlan.idMap.memories["memory-c"]), false);
+
+  const brokenPayload = structuredClone(payload);
+  brokenPayload.memoryLinks = [{
+    migrationId: "link-broken",
+    fromMemoryRef: "missing-memory",
+    toMemoryRef: "memory-a",
+    type: "temporal",
+    weight: 0.5,
+    source: source("memoryLinks", "broken"),
+  }];
+  const brokenManifest = { ...manifest, counts: { ...manifest.counts, memoryLinks: 1 } };
+  const brokenBytes = await writeFloatMigrationPackage({ manifest: brokenManifest, payload: brokenPayload, binaryAssets: [] });
+  const brokenRun = await dryRunFloatMigrationPackage(brokenBytes, { storage: { kind: "isolated-browser", async readSnapshot() { throw new Error("snapshot should not be read"); } } });
+  assert.equal(brokenRun.ok, false);
+  assert.match(brokenRun.errors.join("\n"), /orphan migration|missing memory nodes/);
+
+  const invalidStrengthPayload = structuredClone(payload);
+  invalidStrengthPayload.memoryLinks = [{
+    migrationId: "link-invalid-strength",
+    fromMemoryRef: "memory-a",
+    toMemoryRef: "memory-b",
+    type: "temporal",
+    source: source("memoryLinks", "invalid-strength"),
+  }];
+  const invalidStrengthManifest = { ...manifest, counts: { ...manifest.counts, memoryLinks: 1 } };
+  const invalidStrengthBytes = await writeFloatMigrationPackage({ manifest: invalidStrengthManifest, payload: invalidStrengthPayload, binaryAssets: [] });
+  const invalidStrengthRun = await dryRunFloatMigrationPackage(invalidStrengthBytes, { storage: { kind: "isolated-browser", async readSnapshot() { throw new Error("snapshot should not be read"); } } });
+  assert.equal(invalidStrengthRun.ok, false);
+  assert.match(invalidStrengthRun.errors.join("\n"), /invalid strength/);
 
   const existingMemoryLinks = [
     {

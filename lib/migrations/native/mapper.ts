@@ -10,6 +10,7 @@ import type {
   NativeMediaImport,
   NativeMigrationPlan,
 } from "./types";
+import { mapNativeMemoryLinks } from "./memory-links";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -209,9 +210,10 @@ function mapWorldBook(
 }
 
 function futureIntentMeta(intent: MigrationFutureIntent): FutureIntentMeta {
+  const status = intent.status === "fulfilled" || intent.status === "cancelled" ? intent.status : "pending";
   return {
     type: "plan",
-    status: "pending",
+    status,
     timePrecision: intent.timePrecision,
     ...(intent.timeExpression ? { originalTimeExpression: intent.timeExpression } : {}),
   };
@@ -646,6 +648,26 @@ export function buildNativeMigrationPlan(
     memories.push(entry);
   }
 
+  const activeMemoryBySourceId = new Map<string, { source: typeof activeMemories[number]; nativeId: string; characterId: string }>();
+  for (const entry of memories) {
+    if (entry.type !== "long_term") continue;
+    const sourceId = asString(entry.metadata?.migrationId);
+    const source = sourceId ? sourceMemoryById.get(sourceId) : undefined;
+    const terminalFutureIntent = entry.futureIntent?.status === "fulfilled" || entry.futureIntent?.status === "cancelled";
+    if (source && source.archived !== true && !terminalFutureIntent) {
+      activeMemoryBySourceId.set(source.migrationId, { source, nativeId: entry.id, characterId: entry.characterId });
+    }
+  }
+  const memoryLinkMapping = mapNativeMemoryLinks(
+    payload.memoryLinks,
+    payload.memories,
+    activeMemoryBySourceId,
+    sourceFingerprint,
+    fallbackTime,
+    deterministicNativeId,
+  );
+  for (const [sourceId, targetId] of Object.entries(memoryLinkMapping.sourceIdMap)) setMap("memoryLinks", sourceId, targetId);
+
   const legacy = Array.isArray(payload.extended.legacyCharacterMemories) ? payload.extended.legacyCharacterMemories : [];
   let legacyCoreMemoryCount = 0;
   legacy.forEach((raw, index) => {
@@ -722,6 +744,8 @@ export function buildNativeMigrationPlan(
     worldbooks,
     calendar,
     memories,
+    memoryLinks: memoryLinkMapping.links,
+    memoryLinkAudit: memoryLinkMapping.audit,
     activeMemoryPalaceCount: activeMemories.length,
     legacyCoreMemoryCount,
     activeFutureIntentCount,

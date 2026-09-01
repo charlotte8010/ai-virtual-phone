@@ -110,6 +110,7 @@ try {
     memories, futureIntents, memoryLinks: Array.from({ length: 32667 }, (_, index) => ({
       migrationId: `mig_memory_link_${index}`, fromMemoryRef: memories[index % memories.length].migrationId,
       toMemoryRef: memories[(index + 1) % memories.length].migrationId, type: "temporal",
+      weight: 1,
       source: source("memoryLinks", String(index)),
     })),
     extended: { legacyCharacterMemories },
@@ -152,7 +153,7 @@ try {
   const emptySnapshot = {
     identities: [], characters: [], contacts: [], sessions: [], messages: [], mediaIds: [],
     moments: [], momentComments: [], diaries: [], worlds: [], worldbooks: [], calendar: [],
-    memories: [], storySessions: [], storyMessages: [],
+    memories: [], memoryLinks: [], storySessions: [], storyMessages: [],
   };
   const storage = {
     kind: "isolated-browser",
@@ -177,12 +178,18 @@ try {
   assert.equal(summary.activeFutureIntents, 4);
   assert.equal(summary.archivedWindowsill, 5);
   assert.equal(summary.memoryLinks, 32667);
+  assert.equal(summary.activeMemoryLinks, plan.memoryLinks.length);
+  assert.equal(summary.archiveOnlyMemoryLinks, summary.memoryLinks - summary.activeMemoryLinks);
+  assert.equal(plan.memoryLinkAudit.brokenRef, 0);
+  assert.equal(plan.memoryLinkAudit.crossCharacter, realMode ? 0 : 32667);
+  assert.equal(plan.memoryLinkAudit.invalidStrength, 0);
   assert.equal(summary.legacyCoreSummaries, 11);
   assert.equal(summary.timelineRecords, 0);
   assert.equal(plan.messages.length, 4708);
   assert.equal(plan.storyMessages.length, 445);
   assert.equal(plan.storySessions.length, 1);
   assert.equal(plan.archive.stories.length, 193);
+  assert.equal(plan.archive.memoryLinks.length, 32667);
 
   const chatSourceIds = new Set(plan.messages.map((message) => message.id));
   const storySourceIds = new Set(plan.storyMessages.map((message) => message.id));
@@ -263,6 +270,7 @@ try {
       add("worldbooks", reconciliation.worldbooks.create);
       add("calendar", reconciliation.calendar.create);
       add("memories", reconciliation.memories.create);
+      add("memoryLinks", reconciliation.memoryLinks.create);
       if (reconciliation.media.create.length) {
         for (const media of reconciliation.media.create) assert.ok(await pkg.getAssetBytes(media.sourceAssetId));
         this.snapshot.mediaIds.push(...reconciliation.media.create.map((media) => media.targetId));
@@ -298,6 +306,7 @@ try {
       remove("worldbooks", journal.created.worldbooks);
       remove("calendar", journal.created.calendar);
       remove("memories", journal.created.memories);
+      remove("memoryLinks", journal.created.memoryLinks);
       if (journal.created.media?.length) {
         const removeIds = new Set(journal.created.media);
         this.snapshot.mediaIds = this.snapshot.mediaIds.filter((id) => !removeIds.has(id));
@@ -316,17 +325,20 @@ try {
   assert.equal(first.dryRun.reconciliation.storyMessages.create.length, 445);
   assert.equal(first.dryRun.reconciliation.storySessions.reuse.length, 0);
   assert.equal(first.dryRun.reconciliation.storyMessages.conflicts.length, 0);
-  assert.equal(first.dryRun.reconciliation.totals.create, 5528);
+  const expectedCreates = first.dryRun.reconciliation.totals.create;
+  assert.equal(expectedCreates - first.dryRun.reconciliation.memoryLinks.create.length, 5528);
   assert.equal(first.dryRun.reconciliation.totals.conflicts, 0);
 
   const applied = await applyFloatMigrationPackage(inputBytes, { storage: storageAfterApply });
   assert.equal(applied.ok, true, JSON.stringify(applied.expectedVsActual));
   assert.equal(applied.expectedVsActual.remainingCreatesAfterApply, 0);
-  assert.equal(applied.expectedVsActual.plannedCreates, 5528);
-  assert.equal(applied.expectedVsActual.actualCreates, 5528);
+  assert.equal(applied.expectedVsActual.plannedCreates, expectedCreates);
+  assert.equal(applied.expectedVsActual.actualCreates, expectedCreates);
   assert.equal(applied.expectedVsActual.failed, 0);
   assert.equal(applied.expectedVsActual.warnings, 0);
   assert.equal(storageAfterApply.snapshot.messages.length, 4708);
+  assert.equal(storageAfterApply.snapshot.memoryLinks.length, plan.memoryLinks.length);
+  assert.equal((applied.journal.created.memoryLinks ?? []).length, plan.memoryLinks.length);
   assert.equal(storageAfterApply.snapshot.storySessions.length, 1);
   assert.equal(storageAfterApply.snapshot.storyMessages.length, 445);
   assert.equal(applied.journal.created.storySessions.length, 1);
@@ -355,6 +367,7 @@ try {
   assert.equal(storageAfterApply.snapshot.worldbooks.length, 0);
   assert.equal(storageAfterApply.snapshot.calendar.length, 0);
   assert.equal(storageAfterApply.snapshot.memories.length, 0);
+  assert.equal(storageAfterApply.snapshot.memoryLinks.length, 0);
   assert.equal(storageAfterApply.snapshot.archive, undefined);
   assert.equal(storageAfterApply.snapshot.idMap, undefined);
 

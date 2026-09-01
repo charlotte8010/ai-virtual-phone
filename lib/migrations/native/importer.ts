@@ -83,9 +83,20 @@ function dryRunSummary(plan: NativeMigrationPlan): NativeMigrationDryRun["summar
     activeFutureIntents: plan.activeFutureIntentCount,
     archivedWindowsill: plan.archivedWindowsillCount,
     memoryLinks: plan.archive.memoryLinks.length,
+    activeMemoryLinks: plan.memoryLinks.length,
+    archiveOnlyMemoryLinks: plan.archive.memoryLinks.length - plan.memoryLinks.length,
     legacyCoreSummaries: plan.legacyCoreMemoryCount,
     timelineRecords: plan.timelineRecords.length,
   };
+}
+
+function validateMemoryLinkAudit(plan: NativeMigrationPlan): string[] {
+  const audit = plan.memoryLinkAudit;
+  const errors: string[] = [];
+  if (audit.brokenRef > 0) errors.push(`memory link migration stopped: ${audit.brokenRef} link(s) reference missing memory nodes`);
+  if (audit.invalidStrength > 0) errors.push(`memory link migration stopped: ${audit.invalidStrength} activatable link(s) have invalid strength`);
+  if (audit.invalidType > 0) errors.push(`memory link migration stopped: ${audit.invalidType} activatable link(s) have invalid type`);
+  return errors;
 }
 
 export interface PrepareNativeMigrationOptions {
@@ -112,6 +123,8 @@ export async function dryRunFloatMigrationPackage(
   const read = await readFloatMigrationPackage(input, { zipLoader: options.zipLoader });
   if (!read.ok) return { ok: false, errors: read.errors, warnings: read.warnings };
   const plan = buildNativeMigrationPlan(read.manifest, read.payload, read.assets);
+  const linkErrors = validateMemoryLinkAudit(plan);
+  if (linkErrors.length) return { ok: false, errors: linkErrors, warnings: [...read.warnings, ...plan.warnings] };
   await materializeInlineAssets(plan, read);
   const snapshot = await options.storage.readSnapshot(plan);
   const reconciliation = reconcileNativeMigrationPlan(plan, snapshot);
@@ -142,6 +155,7 @@ function copyReconciliationToJournal(journal: MigrationRunJournal, r: NativeMigr
   set("worldbooks", r.worldbooks, id);
   set("calendar", r.calendar, id);
   set("memories", r.memories, id);
+  set("memoryLinks", r.memoryLinks, id);
   set("storySessions", r.storySessions, id);
   set("storyMessages", r.storyMessages, id);
   const archiveKey = `archive:${journal.sourceFingerprint}`;
