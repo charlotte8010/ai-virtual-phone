@@ -198,12 +198,14 @@ export default function MigrationCompletionValidationPage() {
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState("");
   const [running, setRunning] = useState(false);
+  const [stage, setStage] = useState("idle");
 
   async function run(): Promise<void> {
     if (!file) return;
     setRunning(true);
     setResult(null);
     setError("");
+    setStage("reading-package");
 
     const bytes = new Uint8Array(await file.arrayBuffer());
     const namespace = `real_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -212,11 +214,14 @@ export default function MigrationCompletionValidationPage() {
     const conflictStorage = new IsolatedBrowserNativeMigrationStorage(conflictNamespace);
 
     try {
+      setStage("seed-baseline");
       await storage.seedForIntegration({ identities: [BASELINE_IDENTITY] });
+      setStage("dry-run");
       const dry = await dryRunFloatMigrationPackage(bytes, { storage });
       if (!dry.ok) throw new Error(`dry-run failed: ${dry.errors.join(" | ")}`);
       assertRealPackage(dry.dryRun.plan);
 
+      setStage("first-apply");
       const spies = installSideEffectSpies(namespace);
       let first;
       try {
@@ -226,6 +231,7 @@ export default function MigrationCompletionValidationPage() {
       }
       if (!("journal" in first) || !first.ok) throw new Error(`first apply failed: ${JSON.stringify(first)}`);
 
+      setStage("first-reopen-reread");
       closeForReopen(storage);
       storage = new IsolatedBrowserNativeMigrationStorage(namespace);
       const firstSnapshot = await storage.readSnapshot(first.dryRun.plan);
@@ -266,6 +272,7 @@ export default function MigrationCompletionValidationPage() {
       if (spies.counts.productionIndexedDbOpens.length) throw new Error(`production IndexedDB opened: ${spies.counts.productionIndexedDbOpens.join(", ")}`);
       if (spies.counts.productionMemoryWrites !== 0) throw new Error(`production memory writes=${spies.counts.productionMemoryWrites}`);
 
+      setStage("second-apply");
       const beforeSecond = firstCounts;
       const second = await applyFloatMigrationPackage(bytes, { storage });
       if (!("journal" in second) || !second.ok) throw new Error(`second apply failed: ${JSON.stringify(second)}`);
@@ -279,6 +286,7 @@ export default function MigrationCompletionValidationPage() {
         throw new Error(`second apply created records ${JSON.stringify(second.expectedVsActual)}`);
       }
 
+      setStage("conflict-validation");
       const conflictSetup = await dryRunFloatMigrationPackage(bytes, { storage: conflictStorage });
       if (!conflictSetup.ok) throw new Error(`conflict setup failed: ${conflictSetup.errors.join(" | ")}`);
       const target = conflictSetup.dryRun.plan.characters[0].value;
@@ -292,6 +300,7 @@ export default function MigrationCompletionValidationPage() {
         throw new Error("conflict test overwrote pre-existing record");
       }
 
+      setStage("rollback");
       const rollback = await rollbackFloatMigrationRun(first.journal.runId, storage);
       if (!rollback.ok || rollback.journal?.status !== "rolled_back") throw new Error(`rollback failed ${JSON.stringify(rollback)}`);
       closeForReopen(storage);
@@ -306,6 +315,7 @@ export default function MigrationCompletionValidationPage() {
 
       const firstActualCreate = countCreated(first.journal.created as Record<string, string[] | undefined>);
       const secondActualCreate = countCreated(second.journal.created as Record<string, string[] | undefined>);
+      setStage("complete");
       setResult({
         namespace,
         databaseName: storage.databaseName,
@@ -368,9 +378,11 @@ export default function MigrationCompletionValidationPage() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.stack || cause.message : String(cause));
     } finally {
+      setStage("cleanup");
       await storage.dispose?.();
       await conflictStorage.dispose?.();
       setRunning(false);
+      setStage((current) => current === "cleanup" ? "finished" : current);
     }
   }
 
@@ -378,6 +390,7 @@ export default function MigrationCompletionValidationPage() {
     <main style={{ padding: 24, fontFamily: "monospace", maxWidth: 1100, margin: "0 auto" }}>
       <h1>Migration Completion Validation</h1>
       <p>Client-only isolated IndexedDB harness. The selected package is never uploaded.</p>
+      <p id="validation-stage">Stage: {stage}</p>
       <input id="migration-package" type="file" accept=".zip,.float-migration.zip" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
       <button id="run-validation" type="button" disabled={!file || running} onClick={() => void run()} style={{ marginLeft: 12 }}>
         {running ? "Running…" : "Run isolated validation"}
