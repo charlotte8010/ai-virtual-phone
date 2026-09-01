@@ -27,6 +27,17 @@ const mockSources = new Map([
         export async function loadMemoryEntriesByType(characterId, type) {
             return globalThis.__cores
                 .filter(entry => entry.characterId === characterId && entry.type === type)
+                .map(entry => ({
+                    ...structuredClone(entry),
+                    tags: entry.tags ?? [],
+                    kind: entry.kind ?? "event",
+                    accessCount: entry.accessCount ?? 0,
+                    stability: entry.stability ?? 0.5,
+                }));
+        }
+        export async function loadRawCoreMemoryEntries(characterId) {
+            return globalThis.__cores
+                .filter(entry => entry.characterId === characterId && entry.type === "core")
                 .map(entry => structuredClone(entry));
         }
         export async function replaceCoreMemoriesWithSnapshot(request) {
@@ -121,8 +132,13 @@ assert.doesNotMatch(compactionSource, /DEFAULT_CORE_MEMORY_PROMPT/);
 const compaction = await loadModule(resolve(repoRoot, "lib/core-memory-compaction.ts"));
 await compaction.evaluate();
 
+const legacyCore = memory("c1-a");
+delete legacyCore.tags;
+delete legacyCore.kind;
+delete legacyCore.accessCount;
+delete legacyCore.stability;
 const originalC1 = [
-    memory("c1-a"),
+    legacyCore,
     memory("c1-b", "char-1", { content: "用户与角色已经确认恋爱关系。", sourceApp: "story" }),
 ];
 const originalC2 = [memory("c2-a", "char-2", { content: "第二角色的独立事实。" })];

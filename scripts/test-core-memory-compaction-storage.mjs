@@ -174,12 +174,18 @@ await storage.evaluate();
 const {
     saveMemoryEntries,
     saveMemoryLinks,
+    loadRawCoreMemoryEntries,
     replaceCoreMemoriesWithSnapshot,
     loadLatestCoreCompactionSnapshot,
     restoreCoreCompactionSnapshot,
 } = storage.namespace;
 
-const c1 = [memory("c1-a", "char-1"), memory("c1-b", "char-1", "core", { mood: "tender" })];
+const legacyCore = memory("c1-a", "char-1");
+delete legacyCore.tags;
+delete legacyCore.kind;
+delete legacyCore.accessCount;
+delete legacyCore.stability;
+const c1 = [legacyCore, memory("c1-b", "char-1", "core", { mood: "tender" })];
 const c2 = [memory("c2-a", "char-2")];
 const longTerm = memory("lt-1", "char-1", "long_term");
 const preExistingLink = {
@@ -194,6 +200,12 @@ const preExistingLink = {
 };
 await saveMemoryEntries([...c1, ...c2, longTerm], { suppressMemoryLinkLifecycle: true });
 await saveMemoryLinks([preExistingLink]);
+const rawBeforeApply = await loadRawCoreMemoryEntries("char-1");
+assert.deepEqual(rawBeforeApply, c1, "maintenance raw loader preserves legacy field absence");
+assert.equal("tags" in rawBeforeApply[0], false);
+assert.equal("kind" in rawBeforeApply[0], false);
+assert.equal("accessCount" in rawBeforeApply[0], false);
+assert.equal("stability" in rawBeforeApply[0], false);
 
 const created = [
     memory("new-1", "char-1", "core", { content: "短事实一", createdAt: "2026-09-02T00:00:00.000Z" }),
@@ -207,15 +219,21 @@ const snapshot = {
     originalEntries: clone(c1),
     createdMemoryIds: created.map(entry => entry.id),
 };
-await replaceCoreMemoriesWithSnapshot({ snapshot, originalEntries: c1, newEntries: created });
+await replaceCoreMemoriesWithSnapshot({ characterId: "char-1", snapshot, originalEntries: c1, newEntries: created });
 assert.deepEqual([...context.__memoryRecords.values()].filter(entry => entry.characterId === "char-1" && entry.type === "core"), created);
 assert.deepEqual(context.__memoryRecords.get("c2-a"), c2[0], "another character is untouched");
 assert.deepEqual(context.__memoryRecords.get("lt-1"), longTerm, "long-term memories are untouched");
 assert.deepEqual(context.__memoryLinks.get(preExistingLink.id), preExistingLink, "links are untouched");
-assert.deepEqual(await loadLatestCoreCompactionSnapshot("char-1"), snapshot);
+assert.deepEqual(await loadLatestCoreCompactionSnapshot("char-1"), snapshot, "snapshot stores exact raw originals");
+assert.deepEqual(
+    (await loadLatestCoreCompactionSnapshot("char-1")).originalEntries,
+    rawBeforeApply,
+    "snapshot.originalEntries has no normalized fields",
+);
 
 const conflictRequest = {
     snapshot: { ...snapshot, runId: "run-conflict" },
+    characterId: "char-1",
     originalEntries: created,
     newEntries: [memory("c2-a", "char-1", "core", { content: "must not overwrite c2" })],
 };
@@ -233,6 +251,10 @@ const restored = await restoreCoreCompactionSnapshot("char-1", "run-1");
 assert.ok(restored.restoredAt, "restore records that the snapshot is no longer active");
 assert.deepEqual(context.__memoryRecords.get("c1-a"), c1[0]);
 assert.deepEqual(context.__memoryRecords.get("c1-b"), c1[1]);
+assert.deepEqual(await loadRawCoreMemoryEntries("char-1"), c1, "restore writes back exact raw records");
+for (const field of ["tags", "kind", "accessCount", "stability"]) {
+    assert.equal(field in context.__memoryRecords.get("c1-a"), false, `restore keeps legacy ${field} absent`);
+}
 assert.equal(context.__memoryRecords.has("new-1"), false);
 assert.equal(context.__memoryRecords.has("new-2"), false);
 assert.deepEqual(context.__memoryLinks.get(preExistingLink.id), preExistingLink, "Restore does not delete memory links");
