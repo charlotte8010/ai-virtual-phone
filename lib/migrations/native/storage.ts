@@ -313,11 +313,14 @@ export class ProductionNativeMigrationStorage implements NativeMigrationStorage 
       }
 
       if (reconciliation.memories.create.length) {
-        await saveMemoryEntries(reconciliation.memories.create, { suppressMemoryLinkLifecycle: true });
+        await saveMemoryEntries(reconciliation.memories.create, {
+          suppressMemoryLinkLifecycle: true,
+          strictDurability: true,
+        });
         created.memories = ids(reconciliation.memories.create, (entry) => entry.id);
       }
       if (reconciliation.memoryLinks.create.length) {
-        await saveMemoryLinks(reconciliation.memoryLinks.create);
+        await saveMemoryLinks(reconciliation.memoryLinks.create, { strictDurability: true });
         created.memoryLinks = ids(reconciliation.memoryLinks.create, (entry) => entry.id);
       }
 
