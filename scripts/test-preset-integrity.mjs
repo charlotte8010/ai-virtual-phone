@@ -26,6 +26,10 @@ await module.evaluate();
 
 const { repairPresetPromptIntegrity, repairPresetCollectionIntegrity } = module.namespace;
 
+function plain(value) {
+    return JSON.parse(JSON.stringify(value));
+}
+
 function prompt(identifier, name, content, enabled = true) {
     return {
         identifier,
@@ -72,8 +76,8 @@ function preset(overrides = {}) {
     });
     const result = repairPresetPromptIntegrity(input);
     assert.equal(result.changed, true);
-    assert.deepEqual(result.preset.prompts.map(item => item.identifier), ["alpha", "beta"]);
-    assert.deepEqual(result.preset.prompt_order, [
+    assert.deepEqual(plain(result.preset.prompts.map(item => item.identifier)), ["alpha", "beta"]);
+    assert.deepEqual(plain(result.preset.prompt_order), [
         { identifier: "alpha", enabled: true },
         { identifier: "beta", enabled: true },
     ]);
@@ -97,10 +101,10 @@ function preset(overrides = {}) {
         ],
     });
     const result = repairPresetPromptIntegrity(input);
-    const ids = result.preset.prompts.map(item => item.identifier);
+    const ids = plain(result.preset.prompts.map(item => item.identifier));
     assert.equal(new Set(ids).size, ids.length);
     assert.deepEqual(ids, ["alpha", "alpha__3", "alpha__2"]);
-    assert.deepEqual(result.preset.prompt_order, [
+    assert.deepEqual(plain(result.preset.prompt_order), [
         { identifier: "alpha", enabled: true },
         { identifier: "alpha__3", enabled: false },
         { identifier: "alpha__2", enabled: true },
@@ -115,8 +119,8 @@ function preset(overrides = {}) {
         prompt_order: [{ identifier: "beta", enabled: false }],
     });
     const result = repairPresetPromptIntegrity(input);
-    assert.deepEqual(result.preset.prompts.map(item => item.identifier), ["prompt_1", "beta"]);
-    assert.deepEqual(result.preset.prompt_order, [
+    assert.deepEqual(plain(result.preset.prompts.map(item => item.identifier)), ["prompt_1", "beta"]);
+    assert.deepEqual(plain(result.preset.prompt_order), [
         { identifier: "beta", enabled: false },
         { identifier: "prompt_1", enabled: true },
     ]);
@@ -136,7 +140,7 @@ function preset(overrides = {}) {
     const twice = repairPresetPromptIntegrity(once.preset);
     assert.equal(once.changed, true);
     assert.equal(twice.changed, false);
-    assert.deepEqual(twice.preset, once.preset);
+    assert.deepEqual(plain(twice.preset), plain(once.preset));
 }
 
 // Collection result reports only the presets that actually changed.
