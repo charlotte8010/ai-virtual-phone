@@ -60,11 +60,11 @@ function normalizeIdentifier(value: unknown, index: number): string {
     return trimmed || `prompt_${index + 1}`;
 }
 
-function allocateUniqueIdentifier(base: string, used: Set<string>): string {
+function allocateUniqueIdentifier(base: string, used: Set<string>, reserved: Set<string>): string {
     if (!used.has(base)) return base;
     let suffix = 2;
     let candidate = `${base}__${suffix}`;
-    while (used.has(candidate)) {
+    while (used.has(candidate) || reserved.has(candidate)) {
         suffix += 1;
         candidate = `${base}__${suffix}`;
     }
@@ -77,6 +77,7 @@ function allocateUniqueIdentifier(base: string, used: Set<string>): string {
  * Rules:
  * - exact duplicate prompts with the same original identifier collapse to one;
  * - distinct prompts that share an identifier are preserved and later copies are renamed;
+ * - original identifiers that already exist elsewhere are reserved before duplicate renaming;
  * - duplicate/stale prompt_order entries are removed;
  * - prompt_order is completed so every surviving prompt appears exactly once.
  *
@@ -85,6 +86,9 @@ function allocateUniqueIdentifier(base: string, used: Set<string>): string {
 export function repairPresetPromptIntegrity(input: PresetConfig): PresetPromptIntegrityResult {
     const stats = emptyStats();
     const sourcePrompts = Array.isArray(input.prompts) ? input.prompts : [];
+    const reservedOriginalIdentifiers = new Set(
+        sourcePrompts.map((prompt, index) => normalizeIdentifier(prompt.identifier, index)),
+    );
     const usedIdentifiers = new Set<string>();
     const aliasesByOriginal = new Map<string, string[]>();
     const fingerprintIdsByOriginal = new Map<string, Map<string, string>>();
@@ -105,7 +109,11 @@ export function repairPresetPromptIntegrity(input: PresetConfig): PresetPromptIn
             return;
         }
 
-        const identifier = allocateUniqueIdentifier(originalIdentifier, usedIdentifiers);
+        const identifier = allocateUniqueIdentifier(
+            originalIdentifier,
+            usedIdentifiers,
+            reservedOriginalIdentifiers,
+        );
         if (identifier !== originalIdentifier) stats.renamedPromptIdentifiers += 1;
         usedIdentifiers.add(identifier);
         fingerprints.set(fingerprint, identifier);
