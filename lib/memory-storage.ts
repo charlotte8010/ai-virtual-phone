@@ -23,6 +23,8 @@ const CONFIG_KEY = "ai_phone_memory_config_v1";
 export interface MemoryPersistenceOptions {
     /** Skip all post-save Cognitive Memory link work for imports/restores. */
     suppressMemoryLinkLifecycle?: boolean;
+    /** Require the browser to flush a maintenance/import transaction before it reports success. */
+    strictDurability?: boolean;
 }
 
 export interface CoreMemoryReplacementRequest {
@@ -391,7 +393,10 @@ export async function saveMemoryLink(link: MemoryLink): Promise<void> {
     await saveMemoryLinks([link]);
 }
 
-export async function saveMemoryLinks(links: MemoryLink[]): Promise<void> {
+export async function saveMemoryLinks(
+    links: MemoryLink[],
+    options: Pick<MemoryPersistenceOptions, "strictDurability"> = {},
+): Promise<void> {
     if (links.length === 0) return;
     const db = await openDb();
     if (!db) {
@@ -399,7 +404,11 @@ export async function saveMemoryLinks(links: MemoryLink[]): Promise<void> {
         return;
     }
     try {
-        const tx = db.transaction(LINK_STORE_NAME, "readwrite");
+        const tx = db.transaction(
+            LINK_STORE_NAME,
+            "readwrite",
+            options.strictDurability ? { durability: "strict" } : undefined,
+        );
         const store = tx.objectStore(LINK_STORE_NAME);
         for (const link of links) store.put(link);
         await new Promise<void>((resolve, reject) => {
@@ -489,7 +498,11 @@ export async function saveMemoryEntries(
         return;
     }
     try {
-        const tx = db.transaction(STORE_NAME, "readwrite");
+        const tx = db.transaction(
+            STORE_NAME,
+            "readwrite",
+            options.strictDurability ? { durability: "strict" } : undefined,
+        );
         const store = tx.objectStore(STORE_NAME);
         for (const entry of entries) store.put(entry);
         await new Promise<void>((resolve, reject) => {
