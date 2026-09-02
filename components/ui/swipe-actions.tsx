@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 
 // ── 微信式左滑操作 ──
 // 横向快滑露出操作按钮；竖向滚动、长按拖动等手势不受影响。
@@ -25,6 +25,7 @@ export function useSwipeActions(width = DEFAULT_ACTIONS_WIDTH) {
     const suppressClickRef = useRef(false);
 
     const close = () => {
+        gestureRef.current = null;
         setOpenId(null);
         setSwipingId(null);
     };
@@ -32,16 +33,48 @@ export function useSwipeActions(width = DEFAULT_ACTIONS_WIDTH) {
     const getContent = (wrapper: HTMLElement) =>
         wrapper.querySelector(":scope > .ui-swipe-content") as HTMLElement | null;
 
+    const restoreToBase = (wrapper: HTMLElement, gesture: SwipeGesture) => {
+        const content = getContent(wrapper);
+        if (content) {
+            content.style.transition = "transform 0.2s ease";
+            content.style.transform = `translateX(${gesture.base}px)`;
+        }
+        if (gesture.base < 0) {
+            setOpenId(gesture.id);
+            setSwipingId(gesture.id);
+        } else {
+            setOpenId(null);
+            setSwipingId(null);
+        }
+    };
+
     const onPointerDown = (e: React.PointerEvent<HTMLDivElement>, id: string) => {
         suppressClickRef.current = false;
+        if (e.currentTarget.closest('[data-touch-sorting="true"]')) return;
         if (openId && openId !== id) close();
         const base = openId === id ? -width : 0;
-        gestureRef.current = { id, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, base, locked: false, offset: base };
+        gestureRef.current = {
+            id,
+            pointerId: e.pointerId,
+            startX: e.clientX,
+            startY: e.clientY,
+            base,
+            locked: false,
+            offset: base,
+        };
     };
 
     const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
         const g = gestureRef.current;
         if (!g || g.pointerId !== e.pointerId) return;
+
+        // Long-press reorder owns the gesture once sorting is active.
+        if (e.currentTarget.closest('[data-touch-sorting="true"]')) {
+            gestureRef.current = null;
+            restoreToBase(e.currentTarget, g);
+            return;
+        }
+
         const dx = e.clientX - g.startX;
         const dy = e.clientY - g.startY;
         if (!g.locked) {
@@ -63,10 +96,19 @@ export function useSwipeActions(width = DEFAULT_ACTIONS_WIDTH) {
         content.style.transform = `translateX(${g.offset}px)`;
     };
 
+    const releaseCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+        try {
+            if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                e.currentTarget.releasePointerCapture(e.pointerId);
+            }
+        } catch { /* ignore */ }
+    };
+
     const onPointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
         const g = gestureRef.current;
         if (!g || g.pointerId !== e.pointerId) return;
         gestureRef.current = null;
+        releaseCapture(e);
         if (!g.locked) return;
         suppressClickRef.current = true;
         const open = g.offset < -width / 2;
@@ -77,12 +119,21 @@ export function useSwipeActions(width = DEFAULT_ACTIONS_WIDTH) {
         }
         if (open) {
             setOpenId(g.id);
+            setSwipingId(g.id);
         } else {
             const id = g.id;
             setOpenId(null);
             // 等回弹动画结束再卸载按钮，避免闪烁
             window.setTimeout(() => setSwipingId(cur => (cur === id ? null : cur)), 220);
         }
+    };
+
+    const onPointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+        const g = gestureRef.current;
+        if (!g || g.pointerId !== e.pointerId) return;
+        gestureRef.current = null;
+        releaseCapture(e);
+        restoreToBase(e.currentTarget, g);
     };
 
     // 横滑结束后浏览器可能补发一次 click，交由行内 onClick 消费掉
@@ -100,6 +151,7 @@ export function useSwipeActions(width = DEFAULT_ACTIONS_WIDTH) {
         onPointerDown,
         onPointerMove,
         onPointerEnd,
+        onPointerCancel,
         consumeClickSuppression,
         isRevealed: (id: string) => swipingId === id || openId === id,
         isOpen: (id: string) => openId === id,
@@ -116,21 +168,27 @@ export function SwipeActionRow({ controller, id, disabled, actions, onTouchStart
     onTouchStart?: (e: React.TouchEvent<HTMLDivElement>) => void;
     children: ReactNode;
 }) {
+    // Business identifiers are not guaranteed unique in legacy/imported presets.
+    // Swipe state must therefore use a per-mounted-row identity instead of the business id.
+    const rowInstanceId = useId();
+    const controllerId = `${id}::${rowInstanceId}`;
+
     return (
         <div
             className="ui-swipe-wrap"
             data-swipe-id={id}
+            data-swipe-instance={controllerId}
             onTouchStart={onTouchStart}
-            onPointerDown={disabled ? undefined : (e) => controller.onPointerDown(e, id)}
+            onPointerDown={disabled ? undefined : (e) => controller.onPointerDown(e, controllerId)}
             onPointerMove={disabled ? undefined : controller.onPointerMove}
             onPointerUp={disabled ? undefined : controller.onPointerEnd}
-            onPointerCancel={disabled ? undefined : controller.onPointerEnd}
+            onPointerCancel={disabled ? undefined : controller.onPointerCancel}
         >
-            {controller.isRevealed(id) && <div className="ui-swipe-actions">{actions}</div>}
+            {controller.isRevealed(controllerId) && <div className="ui-swipe-actions">{actions}</div>}
             <div
                 className="ui-swipe-content"
                 style={{
-                    transform: `translateX(${controller.isOpen(id) ? -controller.width : 0}px)`,
+                    transform: `translateX(${controller.isOpen(controllerId) ? -controller.width : 0}px)`,
                     transition: "transform 0.2s ease",
                 }}
             >
