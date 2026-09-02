@@ -7,6 +7,7 @@ import { useId, useRef, useState, type ReactNode } from "react";
 // 一个列表共享一个 controller，保证同时只有一行处于展开状态。
 
 const DEFAULT_ACTIONS_WIDTH = 248; // 四个 62px 按钮
+const SWIPE_INTERACTIVE_SELECTOR = "button,input,textarea,select,a,label,[role='button'],[contenteditable='true'],.ui-swipe-actions";
 
 interface SwipeGesture {
     id: string;
@@ -51,6 +52,8 @@ export function useSwipeActions(width = DEFAULT_ACTIONS_WIDTH) {
     const onPointerDown = (e: React.PointerEvent<HTMLDivElement>, id: string) => {
         suppressClickRef.current = false;
         if (e.currentTarget.closest('[data-touch-sorting="true"]')) return;
+        const target = e.target;
+        if (target instanceof Element && target.closest(SWIPE_INTERACTIVE_SELECTOR)) return;
         if (openId && openId !== id) close();
         const base = openId === id ? -width : 0;
         gestureRef.current = {
