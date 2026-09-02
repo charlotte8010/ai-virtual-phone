@@ -8,7 +8,7 @@ on:
         required: false
         type: string
   push:
-    branches: [main]
+    branches: [main, build/legacy-core-backfill-apk-20260902]
     paths: ["android-shell/**", ".github/workflows/android-shell.yml", "public/icon-512.png"]
 
 jobs:
@@ -20,6 +20,7 @@ jobs:
       SHELL_KEYSTORE_PASSWORD: ${{ secrets.SHELL_KEYSTORE_PASSWORD }}
       SHELL_KEY_ALIAS: ${{ secrets.SHELL_KEY_ALIAS }}
       SHELL_KEY_PASSWORD: ${{ secrets.SHELL_KEY_PASSWORD }}
+      # 恢复正常 Float APK：继续使用 production origin，启动地址回到站点根目录。
       SHELL_SITE_URL: ${{ inputs.site_url || vars.SHELL_SITE_URL || 'https://ai-virtual-phone-ten-sigma.vercel.app' }}
     steps:
       - uses: actions/checkout@v4
