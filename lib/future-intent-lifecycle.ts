@@ -65,6 +65,16 @@ export type FutureIntentLifecycleRunResult = {
 
 const TERMINAL_STATUSES = new Set<FutureIntentMeta["status"]>(["fulfilled", "cancelled"]);
 const MAX_CLASSIFIER_CANDIDATES = 32;
+const LIFECYCLE_CHANGE_SIGNAL_PATTERN = /(?:完成|做完|办完|结束|搞定|兑现|实现|达成|履行|已经(?:去|到|见|看|吃|买|拿|交|发|做|完成)|刚刚?(?:去|到|见|看|吃|买|拿|交|发|做|完成)|去了|到了|见到了|看完|吃完|买了|拿到了|交了|发了|做了|不去|不做|不要了|不打算|放弃|取消|作废|算了|终止|停止|撤销|改期|改约|改到|改成|改为|延期|延后|提前|推迟|换到|挪到|重新安排|reschedul|cancel(?:led)?|finish(?:ed)?|complet(?:e|ed)|done|give\s*up|call(?:ed)?\s*off|postpon(?:e|ed)|move(?:d)?\s+to)/iu;
+
+/**
+ * High-recall cost gate only. A positive result merely permits semantic model
+ * classification; it never changes lifecycle state by itself.
+ */
+export function hasFutureIntentLifecycleSignal(text: string): boolean {
+    const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
+    return normalized.length > 0 && LIFECYCLE_CHANGE_SIGNAL_PATTERN.test(normalized);
+}
 
 function isValidTimeZone(value: string | undefined): value is string {
     if (!value) return false;
@@ -684,7 +694,7 @@ export async function runFutureIntentLifecycle(
         ? options.now
         : eventTime || new Date();
     let modelDecision: FutureIntentLifecycleModelDecision | null = null;
-    if (bindings.length > 0) {
+    if (bindings.length > 0 && hasFutureIntentLifecycleSignal(event.content)) {
         const classifier = options.classifier || classifyWithMemorySummaryApi;
         try {
             modelDecision = await classifier(event, bindings.map(item => item.candidate), { now: referenceNow, timezone });

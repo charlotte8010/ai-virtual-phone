@@ -62,6 +62,10 @@ const classifierCandidates = [
     }, { content: "周六和小王看电影" }),
 ];
 const classifierTimeContext = { now: new Date(classifierEvent.timestamp), timezone: "Asia/Shanghai" };
+assert.equal(lifecycle.hasFutureIntentLifecycleSignal("今天工作好累"), false);
+assert.equal(lifecycle.hasFutureIntentLifecycleSignal("电影已经看完了"), true);
+assert.equal(lifecycle.hasFutureIntentLifecycleSignal("周六的电影取消了"), true);
+assert.equal(lifecycle.hasFutureIntentLifecycleSignal("电影改到下周六"), true);
 const lifecyclePrompt = lifecycle.buildFutureIntentLifecyclePrompt(
     classifierEvent,
     classifierTimeContext,
@@ -530,6 +534,26 @@ const modelFailureRun = await lifecycle.runFutureIntentLifecycle(
 );
 assert.equal(modelFailureRun.status, "overdue");
 assert.equal(modelFailureWrites[0][0].futureIntent.status, "overdue");
+
+const gatedEntry = memory("gated-pending", {
+    type: "plan", status: "pending", timePrecision: "exact", targetAt: "2026-09-10T12:00:00.000Z",
+}, { content: "周末一起看电影" });
+let gatedClassifierCalls = 0;
+const gatedRun = await lifecycle.runFutureIntentLifecycle(
+    "char-1",
+    event("gated-ordinary-event", "今天工作好累", "2026-09-05T12:00:00.000Z"),
+    {
+        store: {
+            async loadMemoryEntriesByType() { return [gatedEntry]; },
+            async saveMemoryEntries() { throw new Error("ordinary gated event should not write"); },
+        },
+        timezone: "Asia/Shanghai",
+        classifier: async () => { gatedClassifierCalls += 1; return { action: "cancelled", targetIndex: 0 }; },
+    },
+);
+assert.equal(gatedRun.status, "no_change");
+assert.equal(gatedClassifierCalls, 0);
+assert.equal(gatedEntry.futureIntent.status, "pending");
 
 const unavailableEntry = memory("model-unavailable", {
     type: "plan", status: "pending", timePrecision: "exact", targetAt: "2026-09-10T12:00:00.000Z",
