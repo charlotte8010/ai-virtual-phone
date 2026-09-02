@@ -178,6 +178,8 @@ try {
   assert.equal(Object.hasOwn(secondReconciliation.resolvedIdMap.memoryLinks, "link-temporal"), false);
 
   assert.match(storageSource, /saveMemoryEntries\([\s\S]*suppressMemoryLinkLifecycle:\s*true/);
+  assert.match(storageSource, /saveMemoryEntries\([\s\S]*strictDurability:\s*true/);
+  assert.match(storageSource, /saveMemoryLinks\(reconciliation\.memoryLinks\.create,\s*\{\s*strictDurability:\s*true\s*\}\)/);
   assert.match(storageSource, /saveMemoryLinks/);
   assert.match(storageSource, /loadMemoryLinks/);
   assert.match(storageSource, /deleteMemoryLinks\(journal\.created\.memoryLinks\)[\s\S]*deleteMemoryEntriesWithoutLinkCleanup\(journal\.created\.memories\)/);
