@@ -694,10 +694,16 @@ export function getEventCounter(characterId: string): number {
     return val ? parseInt(val, 10) || 0 : 0;
 }
 
-function incrementEventCounterNow(characterId: string, event: FutureIntentEvent): number {
+function bumpEventCounter(characterId: string): number {
     const next = getEventCounter(characterId) + 1;
     if (typeof window !== "undefined") {
         kvSet(EVENT_COUNTER_PREFIX + characterId, String(next));
+    }
+    return next;
+}
+
+function processFutureIntentEvent(characterId: string, event: FutureIntentEvent): void {
+    if (typeof window !== "undefined") {
         void (async () => {
             let lifecycleResult: { status?: string } | undefined;
             try {
@@ -716,7 +722,47 @@ function incrementEventCounterNow(characterId: string, event: FutureIntentEvent)
         })()
             .catch(error => console.warn("[FutureIntent] Immediate detection failed:", error));
     }
+}
+
+function incrementEventCounterNow(characterId: string, event: FutureIntentEvent): number {
+    const next = bumpEventCounter(characterId);
+    processFutureIntentEvent(characterId, event);
     return next;
+}
+
+type PendingResponseBatch = {
+    characterId: string;
+    events: FutureIntentEvent[];
+    timer: ReturnType<typeof setTimeout>;
+};
+
+const pendingResponseBatches = new Map<string, PendingResponseBatch>();
+const RESPONSE_BATCH_SETTLE_MS = 10_250; // max configurable multi-send gap (10s) + settle margin
+
+function enqueueResponseBatchEvent(characterId: string, event: FutureIntentEvent): void {
+    const batchId = event.responseBatchId;
+    if (!batchId || typeof window === "undefined") {
+        incrementEventCounterNow(characterId, event);
+        return;
+    }
+    const key = `${characterId}\u0000${event.sessionId || ""}\u0000${batchId}`;
+    const previous = pendingResponseBatches.get(key);
+    if (previous) clearTimeout(previous.timer);
+    const events = [...(previous?.events ?? []), event];
+    bumpEventCounter(characterId);
+    // Assistant bubbles are deliberately rendered with the configured gap. Waiting one gap
+    // after the last bubble gives us an explicit logical response batch at the memory boundary.
+    const timer = setTimeout(() => {
+        const pending = pendingResponseBatches.get(key);
+        if (!pending) return;
+        pendingResponseBatches.delete(key);
+        void import("./chat-memory-event")
+            .then(({ mergeFutureIntentResponseBatch }) => {
+                processFutureIntentEvent(pending.characterId, mergeFutureIntentResponseBatch(pending.events));
+            })
+            .catch(error => console.warn("[FutureIntent] Response batch merge failed:", error));
+    }, RESPONSE_BATCH_SETTLE_MS);
+    pendingResponseBatches.set(key, { characterId, events, timer });
 }
 
 export function incrementEventCounter(characterId: string, event: FutureIntentEvent): number {
@@ -742,7 +788,8 @@ export function incrementEventCounter(characterId: string, event: FutureIntentEv
                 || loadCharacters().find(item => item.id === session.contactId)?.id;
             if (!resolvedCharacterId) return;
 
-            incrementEventCounterNow(resolvedCharacterId, event);
+            if (event.responseBatchId) enqueueResponseBatchEvent(resolvedCharacterId, event);
+            else incrementEventCounterNow(resolvedCharacterId, event);
         })()
             .catch(error => console.warn("[FutureIntent] Persisted chat event detection failed:", error));
         return predictedNext;

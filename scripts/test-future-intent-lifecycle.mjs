@@ -40,6 +40,17 @@ function outputNameFor(relativePath, moduleNames) {
 }
 
 const lifecycle = await loadTypeScriptModule("lib/future-intent-lifecycle.ts");
+const chatMemoryEvent = await loadTypeScriptModule("lib/chat-memory-event.ts");
+
+const mergedResponseBatch = chatMemoryEvent.mergeFutureIntentResponseBatch([
+    { id: "bubble-2", sourceApp: "chat", sourceDetail: "direct", timestamp: "2026-09-05T12:00:01.000Z", content: "算了，不去了", sessionId: "session-1", responseBatchId: "batch-1", sourceEventRefs: ["bubble-2"] },
+    { id: "bubble-1", sourceApp: "chat", sourceDetail: "direct", timestamp: "2026-09-05T12:00:00.000Z", content: "周日一起看电影", sessionId: "session-1", responseBatchId: "batch-1", sourceEventRefs: ["bubble-1"] },
+]);
+assert.equal(mergedResponseBatch.id, "bubble-1");
+assert.equal(mergedResponseBatch.timestamp, "2026-09-05T12:00:01.000Z");
+assert.deepEqual(mergedResponseBatch.sourceEventRefs, ["bubble-1", "bubble-2"]);
+assert.match(mergedResponseBatch.content, /bubble-1.*周日一起看电影/u);
+assert.match(mergedResponseBatch.content, /bubble-2.*算了，不去了/u);
 
 const classifierEvent = event("classifier-event", "周六跟小王的电影取消了", "2026-09-05T12:00:00.000Z");
 const classifierCandidates = [
@@ -539,6 +550,27 @@ assert.equal(unavailableRun.status, "no_change");
 assert.equal(unavailableWrites, 0);
 assert.equal(unavailableEntry.futureIntent.status, "pending");
 
+const batchedEntry = memory("batched-plan", {
+    type: "plan", status: "pending", timePrecision: "day", targetAt: "2026-09-06T00:00:00.000Z",
+}, { content: "周日一起看电影" });
+let batchedWrites = [];
+const batchedEvent = {
+    ...event("batch-event-1", "本来周日看电影。\n[event_ref=batch-event-2] 算了，不去了。", "2026-09-05T12:00:00.000Z"),
+    responseBatchId: "response-batch-1",
+    sourceEventRefs: ["batch-event-1", "batch-event-2"],
+};
+const batchedRun = await lifecycle.runFutureIntentLifecycle("char-1", batchedEvent, {
+    store: {
+        async loadMemoryEntriesByType() { return [batchedEntry]; },
+        async saveMemoryEntries(entries) { batchedWrites = entries; },
+    },
+    timezone: "Asia/Shanghai",
+    classifier: async () => ({ action: "cancelled", targetIndex: 0 }),
+});
+assert.equal(batchedRun.status, "cancelled");
+assert.deepEqual(batchedWrites[0].metadata.futureIntentLifecycleEventIds, ["batch-event-1", "batch-event-2"]);
+assert.deepEqual(batchedWrites[0].metadata.futureIntentLifecycle.eventIds, ["batch-event-1", "batch-event-2"]);
+
 const terminalFulfilled = memory("terminal-fulfilled", {
     type: "plan", status: "fulfilled", timePrecision: "exact", targetAt: "2026-09-01T12:00:00.000Z",
     fulfilledAt: "2026-09-01T13:00:00.000Z",
@@ -595,6 +627,8 @@ assert.match(lifecycleSource, /normalizeFutureIntentCandidate/);
 assert.doesNotMatch(lifecycleSource, /FULFILMENT_PATTERN|CANCELLATION_PATTERN|RESCHEDULE_PATTERN|hasIntentRelation/);
 assert.match(memoryStorageSource, /maybeRunFutureIntentLifecycle/);
 assert.match(memoryStorageSource, /lifecycleResult\?\.status === "replaced"/);
+assert.match(memoryStorageSource, /pendingResponseBatches/);
+assert.match(memoryStorageSource, /mergeFutureIntentResponseBatch/);
 assert.match(chatStorageSource, /incrementEventCounter\(persistedSession\.contactId, toFutureIntentEvent\(newMsg\)\)/);
 assert.match(groupChatSource, /incrementEventCounter\(characterId, \{/);
 

@@ -112,9 +112,13 @@ function lifecycleEventIds(entry: MemoryEntry): string[] {
     return readStringArray(entry.metadata?.futureIntentLifecycleEventIds);
 }
 
+function eventRefs(event: FutureIntentEvent): string[] {
+    return event.sourceEventRefs?.length ? event.sourceEventRefs : [event.id];
+}
+
 function hasSeenEvent(entry: MemoryEntry, event: FutureIntentEvent): boolean {
-    return entry.sourceMessageIds?.includes(event.id) === true
-        || lifecycleEventIds(entry).includes(event.id);
+    const seen = new Set([...(entry.sourceMessageIds ?? []), ...lifecycleEventIds(entry)]);
+    return eventRefs(event).every(id => seen.has(id));
 }
 
 function buildLifecycleMetadata(
@@ -125,10 +129,11 @@ function buildLifecycleMetadata(
     const previousIds = lifecycleEventIds(entry);
     return {
         ...(entry.metadata ?? {}),
-        futureIntentLifecycleEventIds: [...new Set([...previousIds, event.id])],
+        futureIntentLifecycleEventIds: [...new Set([...previousIds, ...eventRefs(event)])],
         futureIntentLifecycle: {
             action,
             eventId: event.id,
+            eventIds: eventRefs(event),
             sourceApp: event.sourceApp,
             ...(event.sourceDetail ? { sourceDetail: event.sourceDetail } : {}),
             timestamp: event.timestamp,
@@ -206,17 +211,18 @@ function createReplacementEntry(
         ...(replacement.mood ? { mood: replacement.mood } : {}),
         kind: "future_intent",
         futureIntent,
-        sourceMessageIds: [event.id],
+        sourceMessageIds: eventRefs(event),
         metadata: {
             sourceEventSignatures: [sourceSignature],
             sourceEventTimestamps: [event.timestamp],
             ...(event.sessionId ? { sourceSessionIds: [event.sessionId] } : {}),
             extractionVersion: "future-intent-lifecycle-v2",
             extractionMode: "future_intent_lifecycle_replacement",
-            futureIntentLifecycleEventIds: [event.id],
+            futureIntentLifecycleEventIds: eventRefs(event),
             futureIntentLifecycle: {
                 action: "replacement_created",
                 eventId: event.id,
+                eventIds: eventRefs(event),
                 sourceApp: event.sourceApp,
                 ...(event.sourceDetail ? { sourceDetail: event.sourceDetail } : {}),
                 timestamp: event.timestamp,

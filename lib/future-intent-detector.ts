@@ -10,6 +10,10 @@ export type FutureIntentEvent = {
     timestamp: string;
     content: string;
     sessionId?: string;
+    /** Stable assistant response batch. Multiple rendered bubbles may belong to one model response. */
+    responseBatchId?: string;
+    /** Exact persisted message ids represented by a batched lifecycle event, in chronological order. */
+    sourceEventRefs?: string[];
 };
 
 export type MemoryTimeContext = {
@@ -34,6 +38,10 @@ export type FutureIntentDetectionResult = {
     memory?: MemoryEntry;
     reason?: string;
 };
+
+function eventRefs(event: FutureIntentEvent): string[] {
+    return event.sourceEventRefs?.length ? event.sourceEventRefs : [event.id];
+}
 
 const FUTURE_TIME_PATTERN = /今天(?:晚上|晚|下午|傍晚|夜里)?|今晚|明(?:天|早|晚)|后天|这周|本周|周[一二三四五六日天]|周末|下周|月底|下个月|生日|纪念日|以后|到时候|下次|改天|有空|等你回来|等我忙完|忙完以后|毕业以后|回来以后|哪天/u;
 const FUTURE_INTENT_ACTION_PATTERN = /记得|别忘了|约好|答应|说好了|一起|计划|准备|希望|想要|一定会|陪|承诺|安排|约|见面|吃饭|看电影|叫我|叫你|提醒我|提醒|通知我|通知|到点|带你|旅行|找你/u;
@@ -271,7 +279,7 @@ export function parseFutureIntentModelOutput(
         if (!isRecord(raw)) continue;
         const normalized = normalizeFutureIntentCandidate({
             ...raw,
-            sourceEventRefs: [event.id],
+            sourceEventRefs: eventRefs(event),
         } as unknown as ExtractedMemoryCandidate, timeContext);
         if (normalized) return [normalized];
     }
@@ -417,7 +425,8 @@ export function buildFutureIntentMemoryEntry(
     now = new Date(),
 ): MemoryEntry {
     const creationCandidate = normalizeFutureIntentCreationCandidate(candidate);
-    const sourceSignature = `${characterId}:${event.sourceApp}:${event.id}`;
+    const refs = eventRefs(event);
+    const sourceSignatures = refs.map(ref => `${characterId}:${event.sourceApp}:${ref}`);
     return {
         id: `mem_lt_future_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         characterId,
@@ -435,12 +444,12 @@ export function buildFutureIntentMemoryEntry(
             status: "pending",
             timePrecision: "unknown",
         },
-        sourceMessageIds: [event.id],
+        sourceMessageIds: refs,
         metadata: {
             summarizedEvents: 1,
             timeSpan: event.timestamp,
             ...(event.sessionId ? { sourceSessionIds: [event.sessionId] } : {}),
-            sourceEventSignatures: [sourceSignature],
+            sourceEventSignatures: sourceSignatures,
             sourceEventTimestamps: [event.timestamp],
             extractionVersion: "future-intent-v1",
             extractionMode: "immediate_future_intent",
@@ -640,7 +649,7 @@ async function runFutureIntentDetection(
     const extraction = memoryExtraction.extractMemoriesFromModelOutput(result.content);
     const candidates = extraction.mode === "structured"
         ? extraction.memories
-            .map(candidate => normalizeFutureIntentCandidate({ ...candidate, sourceEventRefs: [event.id] }, timeContext))
+            .map(candidate => normalizeFutureIntentCandidate({ ...candidate, sourceEventRefs: eventRefs(event) }, timeContext))
             .filter((candidate): candidate is ExtractedMemoryCandidate => Boolean(candidate))
         : [];
     const candidate = candidates[0];
