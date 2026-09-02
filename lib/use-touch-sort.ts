@@ -38,7 +38,7 @@ const INITIAL: DragState = {
 
 const AUTO_SCROLL_EDGE = 56;
 const AUTO_SCROLL_MAX_STEP = 14;
-const INTERACTIVE_SELECTOR = "button,input,textarea,select,a,[contenteditable='true'],.ui-swipe-actions";
+const INTERACTIVE_SELECTOR = "button,input,textarea,select,a,label,[role='button'],[contenteditable='true'],.ui-swipe-actions";
 
 async function repairStoredPresetIntegrity(): Promise<boolean> {
     if (typeof window === "undefined") return false;
@@ -120,10 +120,10 @@ export function useTouchSort(
         if (d.scrollLock) {
             d.scrollLock.el.style.overflowY = d.scrollLock.overflowY;
             d.scrollLock.el.style.touchAction = d.scrollLock.touchAction;
+            document.body.style.overflow = d.bodyOverflow;
+            document.body.style.touchAction = d.bodyTouchAction;
             d.scrollLock = null;
         }
-        document.body.style.overflow = d.bodyOverflow;
-        document.body.style.touchAction = d.bodyTouchAction;
         stopPreventingDocumentScroll();
         d.active = false;
         d.index = -1;
@@ -275,6 +275,7 @@ export function useTouchSort(
 
     const beginDrag = useCallback(() => {
         const d = dragRef.current;
+        d.timer = null;
         const container = containerRef.current;
         const targetEl = d.targetEl;
         if (!container || !targetEl) return;
@@ -320,6 +321,18 @@ export function useTouchSort(
         const d = dragRef.current;
         if (d.timer) clearTimeout(d.timer);
 
+        // If a newly imported/edited preset introduced duplicate identities, repair it
+        // before the 400ms long-press window can turn those identities into a reorder.
+        void repairStoredPresetIntegrity();
+
+        // Never sort a row while its left-swipe actions are exposed; close it first.
+        const row = e.currentTarget as HTMLElement;
+        if (row.querySelector(":scope > .ui-swipe-actions")) {
+            d.timer = null;
+            d.targetEl = null;
+            return;
+        }
+
         // Never turn taps/long-presses on controls or revealed swipe actions into reorder gestures.
         const target = e.target;
         if (target instanceof Element && target.closest(INTERACTIVE_SELECTOR)) {
@@ -337,7 +350,7 @@ export function useTouchSort(
         d.startY = touch.clientY;
         d.startX = touch.clientX;
         d.latestY = touch.clientY;
-        d.targetEl = e.currentTarget as HTMLElement;
+        d.targetEl = row;
 
         if (longPressMs <= 0) {
             if (e.cancelable) e.preventDefault();
