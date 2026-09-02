@@ -1,0 +1,25 @@
+name: Preset Gesture Typecheck
+
+on:
+  push:
+    branches: [fix/preset-gesture-stability-20260902]
+
+jobs:
+  preset-gesture-typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Typecheck changed preset files
+        run: >-
+          npx tsc --noEmit --strict --skipLibCheck
+          --target ES2022 --lib dom,dom.iterable,es2022
+          --module esnext --moduleResolution bundler --jsx preserve
+          --esModuleInterop
+          lib/preset-integrity.ts lib/use-touch-sort.ts components/ui/swipe-actions.tsx
+      - run: npm run test:preset-integrity
