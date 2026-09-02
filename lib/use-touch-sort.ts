@@ -1,4 +1,5 @@
 import { useRef, useCallback, useEffect } from "react";
+import { repairPresetCollectionIntegrity } from "./preset-integrity";
 
 /**
  * Touch-based long-press drag-to-reorder hook.
@@ -13,6 +14,7 @@ interface DragState {
     startY: number;
     startX: number;
     latestY: number;
+    targetEl: HTMLElement | null;
     items: { top: number; height: number; el: HTMLElement }[];
     gap: number;
     timer: ReturnType<typeof setTimeout> | null;
@@ -29,13 +31,30 @@ interface DragState {
 
 const INITIAL: DragState = {
     active: false, index: -1, currentIndex: -1,
-    startY: 0, startX: 0, latestY: 0, items: [], gap: 0, timer: null,
+    startY: 0, startX: 0, latestY: 0, targetEl: null, items: [], gap: 0, timer: null,
     autoScrollFrame: null,
     scrollLock: null, bodyOverflow: "", bodyTouchAction: "",
 };
 
 const AUTO_SCROLL_EDGE = 56;
 const AUTO_SCROLL_MAX_STEP = 14;
+const INTERACTIVE_SELECTOR = "button,input,textarea,select,a,[contenteditable='true'],.ui-swipe-actions";
+
+async function repairStoredPresetIntegrity(): Promise<boolean> {
+    if (typeof window === "undefined") return false;
+    try {
+        const { loadPresets, savePresets } = await import("./settings-storage");
+        const current = loadPresets();
+        const repaired = repairPresetCollectionIntegrity(current);
+        if (!repaired.changed) return false;
+        savePresets(repaired.presets);
+        window.dispatchEvent(new Event("settings-presets-updated"));
+        return true;
+    } catch {
+        // Gesture handling must never fail because storage repair was unavailable.
+        return false;
+    }
+}
 
 export function useTouchSort(
     onReorder: (from: number, to: number) => void,
@@ -44,6 +63,22 @@ export function useTouchSort(
     const dragRef = useRef<DragState>({ ...INITIAL });
     const containerRef = useRef<HTMLDivElement>(null);
     const documentTouchMoveCleanupRef = useRef<(() => void) | null>(null);
+
+    // Repair legacy/corrupted preset identities when the preset editor mounts.
+    // Mascot edits can also change identifiers while the page is open, so recheck after those events.
+    useEffect(() => {
+        void repairStoredPresetIntegrity();
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const onMascotFill = () => {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => { void repairStoredPresetIntegrity(); }, 0);
+        };
+        window.addEventListener("mascot-fill-field", onMascotFill);
+        return () => {
+            if (timer) clearTimeout(timer);
+            window.removeEventListener("mascot-fill-field", onMascotFill);
+        };
+    }, []);
 
     const stopPreventingDocumentScroll = useCallback(() => {
         documentTouchMoveCleanupRef.current?.();
@@ -80,6 +115,8 @@ export function useTouchSort(
             el.style.position = "";
             el.style.pointerEvents = "";
         });
+        const container = containerRef.current;
+        if (container) delete container.dataset.touchSorting;
         if (d.scrollLock) {
             d.scrollLock.el.style.overflowY = d.scrollLock.overflowY;
             d.scrollLock.el.style.touchAction = d.scrollLock.touchAction;
@@ -89,6 +126,11 @@ export function useTouchSort(
         document.body.style.touchAction = d.bodyTouchAction;
         stopPreventingDocumentScroll();
         d.active = false;
+        d.index = -1;
+        d.currentIndex = -1;
+        d.targetEl = null;
+        d.items = [];
+        d.gap = 0;
     }, [stopPreventingDocumentScroll]);
 
     const lockScroll = useCallback((container: HTMLElement) => {
@@ -207,13 +249,16 @@ export function useTouchSort(
     const finishDrag = useCallback(() => {
         const d = dragRef.current;
         if (d.timer) { clearTimeout(d.timer); d.timer = null; }
-        if (!d.active) return;
+        if (!d.active) {
+            d.targetEl = null;
+            return;
+        }
 
         const from = d.index;
         const to = d.currentIndex;
         cleanup();
 
-        if (from !== to) onReorder(from, to);
+        if (from >= 0 && to >= 0 && from !== to) onReorder(from, to);
     }, [onReorder, cleanup]);
 
     useEffect(() => {
@@ -224,17 +269,27 @@ export function useTouchSort(
         return () => {
             window.removeEventListener("touchend", handleTouchEnd);
             window.removeEventListener("touchcancel", handleTouchEnd);
-            stopPreventingDocumentScroll();
+            cleanup();
         };
-    }, [finishDrag, stopPreventingDocumentScroll]);
+    }, [finishDrag, cleanup]);
 
-    const beginDrag = useCallback((index: number) => {
+    const beginDrag = useCallback(() => {
         const d = dragRef.current;
         const container = containerRef.current;
-        if (!container) return;
+        const targetEl = d.targetEl;
+        if (!container || !targetEl) return;
+
+        const children = Array.from(container.children) as HTMLElement[];
+        const actualIndex = children.indexOf(targetEl);
+        if (actualIndex < 0 || actualIndex >= children.length) {
+            cleanup();
+            return;
+        }
 
         d.active = true;
-        const children = Array.from(container.children) as HTMLElement[];
+        d.index = actualIndex;
+        d.currentIndex = actualIndex;
+        container.dataset.touchSorting = "true";
         d.items = children.map(el => {
             const rect = el.getBoundingClientRect();
             return { top: rect.top, height: rect.height, el };
@@ -245,8 +300,8 @@ export function useTouchSort(
             ? d.items[1].top - (d.items[0].top + d.items[0].height)
             : 0;
 
-        // visual feedback on dragged item
-        const el = children[index];
+        // visual feedback on the exact DOM row that received touchstart.
+        const el = children[actualIndex];
         el.style.zIndex = "100";
         el.style.transition = "box-shadow 200ms, transform 150ms";
         el.style.transform = "scale(1.02)";
@@ -259,39 +314,57 @@ export function useTouchSort(
         startAutoScroll();
 
         if (navigator.vibrate) navigator.vibrate(25);
-    }, [lockScroll, startAutoScroll, startPreventingDocumentScroll]);
+    }, [cleanup, lockScroll, startAutoScroll, startPreventingDocumentScroll]);
 
-    const onTouchStart = useCallback((index: number, e: React.TouchEvent) => {
+    const onTouchStart = useCallback((_index: number, e: React.TouchEvent) => {
         const d = dragRef.current;
         if (d.timer) clearTimeout(d.timer);
+
+        // Never turn taps/long-presses on controls or revealed swipe actions into reorder gestures.
+        const target = e.target;
+        if (target instanceof Element && target.closest(INTERACTIVE_SELECTOR)) {
+            d.timer = null;
+            d.targetEl = null;
+            return;
+        }
+        if (e.touches.length !== 1) {
+            d.timer = null;
+            d.targetEl = null;
+            return;
+        }
 
         const touch = e.touches[0];
         d.startY = touch.clientY;
         d.startX = touch.clientX;
         d.latestY = touch.clientY;
-        d.index = index;
-        d.currentIndex = index;
+        d.targetEl = e.currentTarget as HTMLElement;
 
         if (longPressMs <= 0) {
             if (e.cancelable) e.preventDefault();
-            beginDrag(index);
+            beginDrag();
             return;
         }
 
-        d.timer = setTimeout(() => beginDrag(index), longPressMs);
+        d.timer = setTimeout(beginDrag, longPressMs);
     }, [longPressMs, beginDrag]);
 
     const onTouchMove = useCallback((e: React.TouchEvent) => {
         const d = dragRef.current;
+        if (e.touches.length !== 1) {
+            if (d.timer) { clearTimeout(d.timer); d.timer = null; }
+            if (d.active) cleanup();
+            return;
+        }
         const touch = e.touches[0];
 
         if (!d.active) {
-            // cancel long-press if finger moved too far
+            // Cancel long-press as soon as scrolling/swiping intent is clear.
             const dx = Math.abs(touch.clientX - d.startX);
             const dy = Math.abs(touch.clientY - d.startY);
             if ((dx > 8 || dy > 8) && d.timer) {
                 clearTimeout(d.timer);
                 d.timer = null;
+                d.targetEl = null;
             }
             return;
         }
@@ -299,7 +372,7 @@ export function useTouchSort(
         if (e.cancelable) e.preventDefault();
         d.latestY = touch.clientY;
         applyDragPosition(touch.clientY);
-    }, [applyDragPosition]);
+    }, [applyDragPosition, cleanup]);
 
     const onTouchEnd = useCallback(() => finishDrag(), [finishDrag]);
 
