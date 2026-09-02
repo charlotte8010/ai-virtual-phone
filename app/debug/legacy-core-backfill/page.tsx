@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Brain, CheckCircle2, RefreshCw, ShieldCheck } from "lucide-react";
 import { loadCharacters } from "@/lib/character-storage";
 import {
@@ -8,16 +8,48 @@ import {
     previewLegacyCoreMemoryBackfill,
     type LegacyCoreBackfillPreview,
 } from "@/lib/core-memory-builder";
+import { hydrateKvDb } from "@/lib/kv-db";
+import type { Character } from "@/lib/character-types";
 
 export default function LegacyCoreBackfillPage() {
-    const characters = useMemo(() => loadCharacters(), []);
-    const [characterId, setCharacterId] = useState(characters[0]?.id ?? "");
+    const [characters, setCharacters] = useState<Character[]>([]);
+    const [characterId, setCharacterId] = useState("");
+    const [loadingCharacters, setLoadingCharacters] = useState(true);
     const [preview, setPreview] = useState<LegacyCoreBackfillPreview | null>(null);
     const [busy, setBusy] = useState(false);
     const [notice, setNotice] = useState("");
     const [applied, setApplied] = useState(false);
 
-    const selectedCharacter = characters.find(character => character.id === characterId) ?? null;
+    useEffect(() => {
+        let cancelled = false;
+
+        const hydrateAndLoadCharacters = async () => {
+            try {
+                await hydrateKvDb();
+                if (cancelled) return;
+                const loaded = loadCharacters();
+                setCharacters(loaded);
+                setCharacterId(current => current || loaded[0]?.id || "");
+                if (loaded.length === 0) {
+                    setNotice("没有读取到角色。请确认当前页面与原 Float 使用同一站点域名，且不要卸载 App。 ");
+                }
+            } catch (error) {
+                if (!cancelled) setNotice(`读取角色失败: ${String(error)}`);
+            } finally {
+                if (!cancelled) setLoadingCharacters(false);
+            }
+        };
+
+        void hydrateAndLoadCharacters();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    const selectedCharacter = useMemo(
+        () => characters.find(character => character.id === characterId) ?? null,
+        [characters, characterId],
+    );
 
     const runPreview = async () => {
         if (!selectedCharacter || busy) return;
@@ -94,7 +126,7 @@ export default function LegacyCoreBackfillPage() {
                         id="legacy-core-character"
                         className="ui-input w-full"
                         value={characterId}
-                        disabled={busy || applied}
+                        disabled={loadingCharacters || busy || applied}
                         onChange={event => {
                             setCharacterId(event.target.value);
                             setPreview(null);
@@ -102,6 +134,8 @@ export default function LegacyCoreBackfillPage() {
                             setApplied(false);
                         }}
                     >
+                        {loadingCharacters ? <option value="">正在读取角色...</option> : null}
+                        {!loadingCharacters && characters.length === 0 ? <option value="">未读取到角色</option> : null}
                         {characters.map(character => (
                             <option key={character.id} value={character.id}>{character.name}</option>
                         ))}
@@ -109,11 +143,11 @@ export default function LegacyCoreBackfillPage() {
                     <button
                         type="button"
                         className="ui-btn ui-btn-primary w-full py-2.5"
-                        disabled={!selectedCharacter || busy || applied}
+                        disabled={loadingCharacters || !selectedCharacter || busy || applied}
                         onClick={() => void runPreview()}
                     >
                         <RefreshCw size={15} className="mr-1.5" />
-                        {busy && !preview ? "正在整理预览..." : "生成整理预览"}
+                        {loadingCharacters ? "正在读取角色..." : busy && !preview ? "正在整理预览..." : "生成整理预览"}
                     </button>
                 </section>
 
