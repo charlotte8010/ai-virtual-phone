@@ -17,6 +17,7 @@ context.window = {
 context.indexedDB = {};
 context.__memoryRecords = new Map();
 context.__memoryLinks = new Map();
+context.__transactionOptions = [];
 context.__lifecycle = {
     dynamicImports: 0,
     generation: [],
@@ -50,7 +51,8 @@ function createMemoryTransaction(storeName) {
 }
 
 context.__memoryDb = {
-    transaction(storeName) {
+    transaction(storeName, mode, options) {
+        context.__transactionOptions.push({ storeName, mode, options });
         return createMemoryTransaction(storeName);
     },
     close() {},
@@ -201,6 +203,19 @@ assert.equal(context.__lifecycle.generation.length, generationCountBeforeSuppres
 assert.equal(context.__lifecycle.backfill.length, backfillCountBeforeSuppressedBatch);
 assert.equal(context.__lifecycle.embeddingCalls, 0);
 assert.equal(context.__lifecycle.recallStatsWrites, 0);
+
+const strictMemory = memory("strict-migration-memory");
+await saveMemoryEntries([strictMemory], {
+    suppressMemoryLinkLifecycle: true,
+    strictDurability: true,
+});
+assert.equal(context.__transactionOptions.at(-1).storeName, "memories");
+assert.equal(context.__transactionOptions.at(-1).mode, "readwrite");
+assert.equal(context.__transactionOptions.at(-1).options?.durability, "strict");
+await saveMemoryLinks([{ id: "strict-migration-link" }], { strictDurability: true });
+assert.equal(context.__transactionOptions.at(-1).storeName, "memory_links");
+assert.equal(context.__transactionOptions.at(-1).mode, "readwrite");
+assert.equal(context.__transactionOptions.at(-1).options?.durability, "strict");
 
 const failureEntry = memory("lifecycle-failure");
 context.__lifecycle.generationFailure = true;
