@@ -94,8 +94,11 @@ export default function LegacyCoreBackfillPage() {
     };
 
     return (
-        <main className="min-h-screen bg-background text-foreground px-4 py-6">
-            <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+        <main
+            className="h-[100dvh] overflow-y-auto overscroll-contain touch-pan-y bg-background text-foreground px-4 py-6"
+            style={{ WebkitOverflowScrolling: "touch" }}
+        >
+            <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 pb-8">
                 <div className="flex items-center gap-3">
                     <button
                         type="button"
