@@ -38,6 +38,7 @@ class PushService : Service() {
         private const val CH_MESSAGES = "shell_messages"
         private const val CH_CALLS = "shell_calls"
         private const val NOTIF_FG_ID = 1
+        private const val NOTIF_MESSAGE_ID = 100
         private const val PREFS = "float_shell_push"
         private const val PREF_URL = "supabase_url"
         private const val PREF_KEY = "api_key"
@@ -80,7 +81,6 @@ class PushService : Service() {
     private var socket: WebSocket? = null
     private var stopped = false
     private var msgSeq = 2
-    private var notifId = 100
     private var shellSubRegistered = false
     private val reconnectSignal = Object()
 
@@ -288,6 +288,8 @@ class PushService : Service() {
                         }.isSuccess
                         if (shown) return
                     }
+                    // 常驻前台通知也同步显示最近一条角色消息，避免它一直停留在旧状态。
+                    updateKeepAlive("$title：$text2")
                     showMessageNotification(title, text2)
                 }
             }
@@ -422,12 +424,15 @@ class PushService : Service() {
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setWhen(System.currentTimeMillis())
+            .setShowWhen(true)
+            .setOnlyAlertOnce(false)
             .setAutoCancel(true)
             .setContentIntent(contentIntent())
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
-        getSystemService(NotificationManager::class.java).notify(notifId++, notification)
-        if (notifId > 400) notifId = 100
+        // 固定 ID：每条新消息原地刷新为最新内容，不再堆出 100/101/102...。
+        getSystemService(NotificationManager::class.java).notify(NOTIF_MESSAGE_ID, notification)
     }
 
     private fun waitForReconnect(sec: Long) {
