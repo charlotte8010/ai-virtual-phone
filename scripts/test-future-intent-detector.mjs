@@ -81,12 +81,17 @@ const chatDbSource = await readFile(new URL("../lib/chat-db.ts", import.meta.url
 const chatStorageSource = await readFile(new URL("../lib/chat-storage.ts", import.meta.url), "utf8");
 const chatEngineSource = await readFile(new URL("../lib/chat-engine.ts", import.meta.url), "utf8");
 const memoryStorageSource = await readFile(new URL("../lib/memory-storage.ts", import.meta.url), "utf8");
+const cognitiveIngestionSource = await readFile(new URL("../lib/cognitive-memory-ingestion.ts", import.meta.url), "utf8");
 const detectorSource = await readFile(new URL("../lib/future-intent-detector.ts", import.meta.url), "utf8");
-assert.match(chatStorageSource, /incrementEventCounter\(persistedSession\.contactId, toFutureIntentEvent\(newMsg\)\)/);
+assert.match(chatStorageSource, /ingestCognitiveMessageEvent\(/);
 assert.match(chatDbSource, /dbWaitForMessagePersistence/);
 assert.match(memoryStorageSource, /await dbWaitForMessagePersistence\(event\.id\)/);
 assert.match(memoryStorageSource, /const resolvedCharacterId = contact\?\.characterId/);
 assert.match(memoryStorageSource, /incrementEventCounterNow\(resolvedCharacterId, event\)/);
+assert.match(cognitiveIngestionSource, /incrementEventCounter\(input\.characterId, event\)/);
+assert.match(cognitiveIngestionSource, /toFutureIntentEvent\(input\.message, "direct"\)/);
+assert.match(cognitiveIngestionSource, /maybeRunSummarization/);
+assert.doesNotMatch(cognitiveIngestionSource, /loadChatMessages\(|getLastVisibleSessionMessage\(/);
 assert.doesNotMatch(chatEngineSource, /incrementEventCounter/);
 assert.match(detectorSource, /isMemorySourceAllowed\(event\.sourceApp, event\.sourceDetail, config\.shortTermAllowedSources\)/);
 

@@ -13,8 +13,7 @@ import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { emitChatPluginEvent, runChatPluginTransformSync } from "./chat-plugin-hooks";
 import { parseAIResponse } from "./rich-message-parser";
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
-import { incrementEventCounter } from "./memory-storage";
-import { toFutureIntentEvent } from "./chat-memory-event";
+import { ingestCognitiveMessageEvent } from "./cognitive-memory-ingestion";
 
 export const DEFAULT_VISION_IMAGE_PROMPT_LIMIT = 1;
 export const MAX_VISION_IMAGE_PROMPT_LIMIT = 20;
@@ -243,6 +242,7 @@ export type ChatMessage = {
         source: "weixin-cloud";
         botId?: string;
         externalId?: string;
+        cloudStoredAt?: string;
         direction?: "inbound" | "outbound" | "local";
         syncedAt?: string;
         /** 云端主动回复对应的本地触发消息，用于跨时钟因果排序。 */
@@ -1170,13 +1170,12 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
     const persistedSession = sessions[sessIdx];
     if (persistedSession && !persistedSession.isGroup
         && (newMsg.role === "user" || newMsg.role === "assistant")) {
-        incrementEventCounter(persistedSession.contactId, toFutureIntentEvent(newMsg));
-        if (newMsg.role === "assistant" && typeof window !== "undefined") {
-            const characterName = loadCharacters().find(item => item.id === persistedSession.contactId)?.name || "角色";
-            void import("./memory-summarizer")
-                .then(({ maybeRunSummarization }) => maybeRunSummarization(persistedSession.contactId, characterName))
-                .catch(error => console.warn("[ChatStorage] Memory summarization check failed:", error));
-        }
+        const characterName = loadCharacters().find(item => item.id === persistedSession.contactId)?.name || "角色";
+        void ingestCognitiveMessageEvent({
+            characterId: persistedSession.contactId,
+            characterName,
+            message: newMsg,
+        });
     }
 
     if (typeof window !== "undefined") {
@@ -1215,6 +1214,11 @@ export function upsertImportedChatMessage(msg: ChatMessage): { message: ChatMess
     }
 
     return { message: newMsg, inserted: true };
+}
+
+/** Retry persistence for a previously cached imported message after a failed write. */
+export function retryImportedChatMessagePersistence(msg: ChatMessage): Promise<boolean> {
+    return dbPutMessage(msg);
 }
 
 function removeFirstExactResponsePart(rawResponseText: string, content: string): string {

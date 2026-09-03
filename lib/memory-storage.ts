@@ -461,13 +461,20 @@ function incrementEventCounterNow(characterId: string, event: FutureIntentEvent)
     return next;
 }
 
-export function incrementEventCounter(characterId: string, event: FutureIntentEvent): number {
+export function incrementEventCounter(
+    characterId: string,
+    event: FutureIntentEvent,
+    options?: { persistenceConfirmed?: boolean },
+): number {
     if (
         typeof window !== "undefined"
         && event.sourceApp === "chat"
         && event.sourceDetail === "direct"
         && event.sessionId
     ) {
+        if (options?.persistenceConfirmed === true) {
+            return incrementEventCounterNow(characterId, event);
+        }
         const predictedNext = getEventCounter(characterId) + 1;
         void (async () => {
             // Chat must use the exact persisted message, never a guessed latest assistant.

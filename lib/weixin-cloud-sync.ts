@@ -11,6 +11,7 @@ import {
   loadChatMessages,
   loadChatSessions,
   reindexSessionMessageOrdersByTime,
+  retryImportedChatMessagePersistence,
   upsertImportedChatMessage,
 } from "./chat-storage";
 import { loadCharacters } from "./character-storage";
@@ -59,8 +60,15 @@ import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from
 import { getWeekStartIso } from "./calendar-utils";
 import { buildCharacterTimeContext } from "./character-time";
 import { isNeteaseConfigured } from "./music-service";
-import { kvGet, kvSet, registerKvMigration } from "./kv-db";
+import { kvGet, kvSet, registerDynamicPrefix, registerKvMigration } from "./kv-db";
 import { getWeixinCloudDeployedAt } from "./cloud-deploy-status";
+import { ingestCognitiveMessageEvent } from "./cognitive-memory-ingestion";
+import {
+  advanceWeixinCloudCognitiveCursor,
+  isRealtimeWeixinCloudMessage,
+  shouldIngestWeixinImportedMessage,
+  type WeixinCloudCognitiveCursor,
+} from "./weixin-cognitive-ingestion";
 import {
   isCloudBackupConfigured,
   loadCloudBackupConfig,
@@ -74,6 +82,8 @@ import { loadWeixinBots } from "./weixin-storage";
 import { parseAIResponse } from "./rich-message-parser";
 
 const WEIXIN_CLOUD_CONFIG_KEY = "weixin_cloud_sync_config_v1";
+const WEIXIN_CLOUD_COGNITIVE_CURSOR_PREFIX = "weixin_cloud_cognitive_cursor_v1_";
+const WEIXIN_CLOUD_COGNITIVE_PENDING_PREFIX = "weixin_cloud_cognitive_pending_v1_";
 const WEIXIN_CLOUD_PREFIX = "weixin-cloud";
 const WEIXIN_CLOUD_INDEX_PATH = `${WEIXIN_CLOUD_PREFIX}/index.json`;
 const WEIXIN_CLOUD_HISTORY_SLOT_TOKEN = "__AI_PHONE_WEIXIN_CLOUD_HISTORY_SLOT_V1__";
@@ -91,6 +101,8 @@ const RUNTIME_CONFIG_SYNC_DEBOUNCE_MS = 3000;
 const RUNTIME_AUTO_SYNC_THROTTLE_MS = 60 * 60 * 1000;
 
 registerKvMigration(WEIXIN_CLOUD_CONFIG_KEY);
+registerDynamicPrefix(WEIXIN_CLOUD_COGNITIVE_CURSOR_PREFIX);
+registerDynamicPrefix(WEIXIN_CLOUD_COGNITIVE_PENDING_PREFIX);
 
 export type WeixinCloudSyncConfig = {
   enabled: boolean;
@@ -346,6 +358,83 @@ export function saveWeixinCloudSyncConfig(config: WeixinCloudSyncConfig): void {
     lastSyncedAt: config.lastSyncedAt,
     lastRuntimePackagePath: config.lastRuntimePackagePath,
   }));
+}
+
+function weixinCloudCognitiveCursorKey(botId: string): string {
+  return `${WEIXIN_CLOUD_COGNITIVE_CURSOR_PREFIX}${sanitizePathPart(botId)}`;
+}
+
+function loadWeixinCloudCognitiveCursor(botId: string): WeixinCloudCognitiveCursor | null {
+  if (typeof window === "undefined") return null;
+  const raw = kvGet(weixinCloudCognitiveCursorKey(botId));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<WeixinCloudCognitiveCursor>;
+    const latest = parsed.latest;
+    if (
+      parsed.version !== 1
+      || typeof parsed.initialized !== "boolean"
+      || (latest !== undefined
+        && (typeof latest !== "object"
+          || typeof latest.timestamp !== "string"
+          || typeof latest.externalId !== "string"))
+    ) return null;
+    return {
+      version: 1,
+      initialized: parsed.initialized,
+      ...(latest ? { latest: { timestamp: latest.timestamp, externalId: latest.externalId } } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveWeixinCloudCognitiveCursor(botId: string, cursor: WeixinCloudCognitiveCursor): void {
+  if (typeof window === "undefined") return;
+  kvSet(weixinCloudCognitiveCursorKey(botId), JSON.stringify(cursor));
+}
+
+function weixinCloudCognitivePendingKey(botId: string): string {
+  return `${WEIXIN_CLOUD_COGNITIVE_PENDING_PREFIX}${sanitizePathPart(botId)}`;
+}
+
+function loadWeixinCloudCognitivePending(botId: string): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  const raw = kvGet(weixinCloudCognitivePendingKey(botId));
+  if (!raw) return new Set();
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return new Set(Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string" && item.length > 0) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveWeixinCloudCognitivePending(botId: string, pending: Set<string>): void {
+  if (typeof window === "undefined") return;
+  kvSet(weixinCloudCognitivePendingKey(botId), JSON.stringify(Array.from(pending)));
+}
+
+function seedWeixinCloudCognitiveCursor(messages: ChatMessage[], botId: string): WeixinCloudCognitiveCursor {
+  let cursor: WeixinCloudCognitiveCursor = { version: 1, initialized: false };
+  for (const message of messages) {
+    const sync = message.cloudSync;
+    if (
+      sync?.source !== "weixin-cloud"
+      || sync.botId !== botId
+      || (sync.direction !== "inbound" && sync.direction !== "outbound")
+      || (message.role !== "user" && message.role !== "assistant")
+      || !sync.externalId
+      || !sync.cloudStoredAt
+    ) continue;
+    cursor = advanceWeixinCloudCognitiveCursor(cursor, {
+      direction: sync.direction,
+      role: message.role,
+      externalId: sync.externalId,
+      receivedAt: sync.cloudStoredAt,
+    });
+  }
+  return cursor;
 }
 
 export function isWeixinCloudSupabaseReady(config: CloudBackupConfig = loadCloudBackupConfig()): boolean {
@@ -1298,16 +1387,22 @@ export async function pullWeixinCloudMessagesFromCloud(
     // 和本地消息 cloudSync 里存的能对上。之前每 8 秒把全部对象串行下载一遍，
     // 消息一多单轮就要几十秒，新消息自然「等好久才拉回来」。
     const seenSession = createOrGetSession(target.characterId);
+    const seenMessages = loadChatMessages(seenSession.id);
     const seenExternalIds = new Set<string>();
-    for (const message of loadChatMessages(seenSession.id)) {
+    for (const message of seenMessages) {
       const sync = message.cloudSync;
       if (sync?.source === "weixin-cloud" && sync.botId === target.botId && sync.externalId) {
         seenExternalIds.add(sanitizePathPart(sync.externalId));
       }
     }
+    let cognitiveCursor = loadWeixinCloudCognitiveCursor(target.botId)
+      ?? seedWeixinCloudCognitiveCursor(seenMessages, target.botId);
+    const cognitiveBaseline = cognitiveCursor.initialized;
+    const pendingCognitiveExternalIds = loadWeixinCloudCognitivePending(target.botId);
     const isKnownName = (name: string) => {
       const nameNoExt = name.replace(/\.json$/i, "");
-      return nameNoExt.startsWith("local_") || seenExternalIds.has(nameNoExt);
+      return nameNoExt.startsWith("local_")
+        || (seenExternalIds.has(nameNoExt) && !pendingCognitiveExternalIds.has(nameNoExt));
     };
 
     // 按创建时间倒序 + 翻页列举。老逻辑按名字升序且只取第一页：桶里对象一旦
@@ -1315,17 +1410,28 @@ export async function pullWeixinCloudMessagesFromCloud(
     // 半天拉不到」。limit 现在只是每页大小：latest 模式整页全新就继续往下翻
     //（离线积压再多也一次拉完），full 模式走遍所有页。
     const objects: Awaited<ReturnType<typeof listObjects>> = [];
+    const scanFull = options?.scan !== "latest";
+    let listingComplete = false;
     try {
-      const scanFull = options?.scan !== "latest";
       for (let offset = 0; offset < 10_000; offset += limit) {
         const page = await listObjects(cloudConfig, prefix, limit, { column: "created_at", order: "desc" }, offset);
         objects.push(...page);
-        if (page.length < limit) break;
+        if (page.length < limit) {
+          listingComplete = true;
+          break;
+        }
         // latest 模式：这一页里出现了已经见过的对象，说明更老的也都拉过了，就此打住
-        if (!scanFull && page.some(object => object.name && !object.name.endsWith("/") && isKnownName(object.name))) break;
+        if (!scanFull && page.some(object => object.name && !object.name.endsWith("/") && isKnownName(object.name))) {
+          listingComplete = true;
+          break;
+        }
       }
     } catch (err) {
       result.errors.push(`${target.characterName}: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
+    if (!listingComplete) {
+      result.errors.push(`${target.characterName}: 微信消息全量扫描超过安全上限，未初始化认知游标`);
       continue;
     }
 
@@ -1334,11 +1440,14 @@ export async function pullWeixinCloudMessagesFromCloud(
     if (freshObjects.length > 0) options?.onNewObjects?.(freshObjects.length);
 
     const storedMessages: WeixinCloudStoredMessage[] = [];
+    let objectDownloadFailed = false;
     for (const object of freshObjects) {
       const path = `${prefix}${object.name}`;
       try {
         const blob = await getObject(cloudConfig, path);
         if (!blob) {
+          objectDownloadFailed = true;
+          result.errors.push(`${object.name}: 云消息对象不存在`);
           result.skipped += 1;
           continue;
         }
@@ -1354,22 +1463,80 @@ export async function pullWeixinCloudMessagesFromCloud(
           }
           storedMessages.push(stored);
         } else {
+          objectDownloadFailed = true;
+          result.errors.push(`${object.name}: 云消息格式无效`);
           result.skipped += 1;
         }
       } catch (err) {
+        objectDownloadFailed = true;
         result.errors.push(`${object.name}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
-    storedMessages.sort((a, b) => cloudStoredMessageTime(a).localeCompare(cloudStoredMessageTime(b)));
+    storedMessages.sort((a, b) => {
+      const timeOrder = cloudStoredMessageTime(a).localeCompare(cloudStoredMessageTime(b));
+      return timeOrder !== 0 ? timeOrder : a.externalId.localeCompare(b.externalId);
+    });
+    if (objectDownloadFailed) continue;
+
+    let importFailed = false;
     for (const stored of storedMessages) {
-      const imported = await importCloudStoredMessage(cloudConfig, stored);
+      const realtime = cognitiveBaseline && isRealtimeWeixinCloudMessage(stored, cognitiveCursor);
+      const pendingExternalId = sanitizePathPart(stored.externalId);
+      let imported: WeixinCloudImportResult;
+      try {
+        imported = await importCloudStoredMessage(cloudConfig, stored, {
+          replayExisting: pendingCognitiveExternalIds.has(pendingExternalId),
+        });
+      } catch (err) {
+        importFailed = true;
+        pendingCognitiveExternalIds.add(pendingExternalId);
+        saveWeixinCloudCognitivePending(target.botId, pendingCognitiveExternalIds);
+        result.errors.push(`${stored.externalId}: ${err instanceof Error ? err.message : String(err)}`);
+        break;
+      }
       if (imported.inserted) {
         result.added += 1;
         touchedSessionIds.add(imported.sessionId);
       } else {
         result.skipped += 1;
       }
+
+      if (realtime) {
+        const messagesForCognition = imported.insertedMessages.length > 0
+          ? imported.insertedMessages
+          : imported.replayMessages;
+        for (const message of messagesForCognition) {
+          if (!shouldIngestWeixinImportedMessage({ message, inserted: true }, true)) continue;
+          const ingested = await ingestCognitiveMessageEvent({
+            characterId: target.characterId,
+            characterName: target.characterName,
+            message,
+          }, { persistenceConfirmed: true });
+          if (!ingested) {
+            importFailed = true;
+            pendingCognitiveExternalIds.add(pendingExternalId);
+            saveWeixinCloudCognitivePending(target.botId, pendingCognitiveExternalIds);
+            result.errors.push(`${stored.externalId}: cognition 写入失败`);
+            break;
+          }
+        }
+      }
+      if (importFailed) break;
+      if (pendingCognitiveExternalIds.delete(pendingExternalId)) {
+        saveWeixinCloudCognitivePending(target.botId, pendingCognitiveExternalIds);
+      }
+
+      // Advance only after this cloud message and every inserted bubble derived
+      // from it have completed successfully.
+      cognitiveCursor = advanceWeixinCloudCognitiveCursor(cognitiveCursor, stored);
+      if (cognitiveBaseline) saveWeixinCloudCognitiveCursor(target.botId, cognitiveCursor);
+    }
+    if (!importFailed && (cognitiveBaseline || scanFull)) {
+      saveWeixinCloudCognitiveCursor(target.botId, {
+        ...cognitiveCursor,
+        initialized: true,
+      });
     }
   }
 
@@ -1822,23 +1989,43 @@ function sanitizePathPart(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
+type WeixinCloudImportResult = {
+  inserted: boolean;
+  insertedMessages: ChatMessage[];
+  replayMessages: ChatMessage[];
+  sessionId: string;
+};
+
 async function importCloudStoredMessage(
   cloudConfig: CloudBackupConfig,
   stored: WeixinCloudStoredMessage,
-): Promise<{ inserted: boolean; sessionId: string }> {
-  if (!isCloudStoredMessage(stored)) return { inserted: false, sessionId: "" };
-  if (isLocalUploadedCloudMessage(stored)) return { inserted: false, sessionId: "" };
+  options: { replayExisting?: boolean } = {},
+): Promise<WeixinCloudImportResult> {
+  if (!isCloudStoredMessage(stored)) return { inserted: false, insertedMessages: [], replayMessages: [], sessionId: "" };
+  if (isLocalUploadedCloudMessage(stored)) return { inserted: false, insertedMessages: [], replayMessages: [], sessionId: "" };
   const session = createOrGetSession(stored.characterId);
   if (stored.localMessageId && loadChatMessages(session.id).some(message => message.id === stored.localMessageId)) {
-    return { inserted: false, sessionId: session.id };
+    return { inserted: false, insertedMessages: [], replayMessages: [], sessionId: session.id };
   }
   const createdAt = resolveCloudImportedMessageCreatedAt(stored, session);
   if (stored.role === "assistant" && stored.direction === "outbound") {
-    return importCloudAssistantMessage(stored, session, createdAt);
+    return importCloudAssistantMessage(stored, session, createdAt, options);
   }
   const id = cloudMessageId(stored);
-  if (loadChatMessages(session.id).some(message => message.id === id)) {
-    return { inserted: false, sessionId: session.id };
+  const existingMessage = loadChatMessages(session.id).find(message => message.id === id);
+  if (existingMessage) {
+    const replayMessages = options.replayExisting ? [existingMessage] : [];
+    for (const message of replayMessages) {
+      if (!await retryImportedChatMessagePersistence(message)) {
+        throw new Error(`${stored.externalId}: imported message persistence retry failed`);
+      }
+    }
+    return {
+      inserted: false,
+      insertedMessages: [],
+      replayMessages,
+      sessionId: session.id,
+    };
   }
   // 微信收到的图片：去重之后才下载，转成 data URL 以图片气泡展示
   const imageDataUrl = stored.imagePath
@@ -1856,11 +2043,18 @@ async function importCloudStoredMessage(
       source: "weixin-cloud",
       botId: stored.botId,
       externalId: stored.externalId,
+      cloudStoredAt: cloudStoredMessageTime(stored),
       direction: stored.direction,
       syncedAt: new Date().toISOString(),
     },
   };
-  return { inserted: upsertImportedChatMessage(msg).inserted, sessionId: session.id };
+  const upserted = upsertImportedChatMessage(msg);
+  return {
+    inserted: upserted.inserted,
+    insertedMessages: upserted.inserted ? [upserted.message] : [],
+    replayMessages: [],
+    sessionId: session.id,
+  };
 }
 
 /**
@@ -1963,17 +2157,31 @@ function normalizeStoredShortcutMarker(
   return null;
 }
 
-function importCloudAssistantMessage(
+async function importCloudAssistantMessage(
   stored: WeixinCloudStoredMessage,
   session: ChatSession,
   createdAt: string,
-): { inserted: boolean; sessionId: string } {
-  const existing = loadChatMessages(session.id).some(message =>
+  options: { replayExisting?: boolean } = {},
+): Promise<WeixinCloudImportResult> {
+  const existingMessages = loadChatMessages(session.id).filter(message =>
     message.cloudSync?.source === "weixin-cloud"
     && message.cloudSync.botId === stored.botId
     && message.cloudSync.externalId === stored.externalId
   );
-  if (existing) return { inserted: false, sessionId: session.id };
+  if (existingMessages.length > 0) {
+    const replayMessages = options.replayExisting ? existingMessages : [];
+    for (const message of replayMessages) {
+      if (!await retryImportedChatMessagePersistence(message)) {
+        throw new Error(`${stored.externalId}: imported message persistence retry failed`);
+      }
+    }
+    return {
+      inserted: false,
+      insertedMessages: [],
+      replayMessages,
+      sessionId: session.id,
+    };
+  }
 
   const characterName = loadCharacters().find(item => item.id === stored.characterId)?.name || "对方";
   // 兜底再剥一次幻觉时间戳：助手侧已经剥过，但旧运行包/旧云函数按老正则清洗，
@@ -2080,10 +2288,15 @@ function importCloudAssistantMessage(
   }
 
   let inserted = false;
+  const insertedMessages: ChatMessage[] = [];
   for (const message of messages) {
-    if (upsertImportedChatMessage(message).inserted) inserted = true;
+    const upserted = upsertImportedChatMessage(message);
+    if (upserted.inserted) {
+      inserted = true;
+      insertedMessages.push(upserted.message);
+    }
   }
-  return { inserted, sessionId: session.id };
+  return { inserted, insertedMessages, replayMessages: [], sessionId: session.id };
 }
 
 function makeCloudImportedMessage(
@@ -2110,6 +2323,7 @@ function makeCloudImportedMessage(
       source: "weixin-cloud",
       botId: stored.botId,
       externalId: stored.externalId,
+      cloudStoredAt: cloudStoredMessageTime(stored),
       direction: stored.direction,
       syncedAt: new Date().toISOString(),
       ...(stored.replyAfterLocalMessageId

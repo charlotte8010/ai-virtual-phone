@@ -595,7 +595,7 @@ assert.match(lifecycleSource, /normalizeFutureIntentCandidate/);
 assert.doesNotMatch(lifecycleSource, /FULFILMENT_PATTERN|CANCELLATION_PATTERN|RESCHEDULE_PATTERN|hasIntentRelation/);
 assert.match(memoryStorageSource, /maybeRunFutureIntentLifecycle/);
 assert.match(memoryStorageSource, /lifecycleResult\?\.status === "replaced"/);
-assert.match(chatStorageSource, /incrementEventCounter\(persistedSession\.contactId, toFutureIntentEvent\(newMsg\)\)/);
+assert.match(chatStorageSource, /ingestCognitiveMessageEvent\(/);
 assert.match(groupChatSource, /incrementEventCounter\(characterId, \{/);
 
 console.log("future intent lifecycle tests passed");
