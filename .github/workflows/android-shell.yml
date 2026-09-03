@@ -8,7 +8,7 @@ on:
         required: false
         type: string
   push:
-    branches: [main]
+    branches: [main, feature/cognitive-memory]
     paths: ["android-shell/**", ".github/workflows/android-shell.yml", "public/icon-512.png"]
 
 jobs:
