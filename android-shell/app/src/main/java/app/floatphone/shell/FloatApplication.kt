@@ -154,7 +154,7 @@ class FloatApplication : Application(), Application.ActivityLifecycleCallbacks {
         )
     }
 
-    private class NativeChatNotificationBridge(context: Context) {
+    private inner class NativeChatNotificationBridge(context: Context) {
         private val appContext = context.applicationContext
 
         @JavascriptInterface
