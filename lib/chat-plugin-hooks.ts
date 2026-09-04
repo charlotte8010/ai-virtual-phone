@@ -13,6 +13,7 @@ import type {
 import { recordChatPluginLog, setChatPluginEnabled } from "./chat-plugin-storage";
 
 const TRANSFORM_TIMEOUT_MS = 8000;
+const PLUGIN_MESSAGE_ENRICHMENT_WAIT_MS = 90_000;
 /** 连续失败达到该次数自动禁用插件（成功一次即清零） */
 const AUTO_DISABLE_THRESHOLD = 5;
 
@@ -31,6 +32,14 @@ class ChatPluginHookBus {
     private transforms = new Map<string, HookHandler[]>();
     private events = new Map<string, HookHandler[]>();
     private failureCounts = new Map<string, number>();
+    /**
+     * 小红书这类插件会在 message.persisted 里异步抓取内容，再在 llm.request 中注入。
+     * apiVersion 1 的 event 仍保持 fire-and-forget，但对明确的异步 enrichment 卡片，
+     * 在同会话真正发 LLM 请求前等待其 persisted handler 收尾，消除竞速。
+     */
+    private pendingXhsEnrichmentBySession = new Map<string, Set<Promise<void>>>();
+    /** plugin:* 消息 id → session，用于 message.updated 后通知 React 从 storage 重载。 */
+    private pluginMessageSessionById = new Map<string, string>();
     private seq = 0;
     /** 运行时注入：自动禁用时同步反注册该插件（避免循环依赖） */
     onAutoDisable: ((pluginId: string) => void) | null = null;
@@ -93,6 +102,38 @@ class ChatPluginHookBus {
         this.failureCounts.delete(pluginId);
     }
 
+    private trackXhsEnrichment(sessionId: string, work: Promise<void>): void {
+        const pending = this.pendingXhsEnrichmentBySession.get(sessionId) ?? new Set<Promise<void>>();
+        pending.add(work);
+        this.pendingXhsEnrichmentBySession.set(sessionId, pending);
+        void work.finally(() => {
+            const current = this.pendingXhsEnrichmentBySession.get(sessionId);
+            if (!current) return;
+            current.delete(work);
+            if (current.size === 0) this.pendingXhsEnrichmentBySession.delete(sessionId);
+        });
+    }
+
+    private async waitForXhsEnrichment(sessionId: string): Promise<void> {
+        const deadline = Date.now() + PLUGIN_MESSAGE_ENRICHMENT_WAIT_MS;
+        while (true) {
+            const pending = this.pendingXhsEnrichmentBySession.get(sessionId);
+            if (!pending || pending.size === 0) return;
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) return;
+            try {
+                await withTimeout(
+                    Promise.allSettled([...pending]).then(() => undefined),
+                    remaining,
+                    "plugin message enrichment wait timeout",
+                );
+            } catch {
+                // enrichment 失败/超时不应把聊天请求本身卡死；对应插件错误会单独记日志
+                return;
+            }
+        }
+    }
+
     /**
      * 异步 transform：按 priority 串行，handler 返回新 payload（或原地修改后返回 undefined）。
      * 单个 handler 超时/异常 → 跳过该插件，payload 保持上一步结果。
@@ -101,6 +142,11 @@ class ChatPluginHookBus {
         point: P,
         payload: ChatPluginTransformPayloadMap[P],
     ): Promise<ChatPluginTransformPayloadMap[P]> {
+        if (point === "llm.request") {
+            const sessionId = (payload as ChatPluginTransformPayloadMap["llm.request"]).sessionId;
+            if (sessionId) await this.waitForXhsEnrichment(sessionId);
+        }
+
         const list = this.transforms.get(point);
         if (!list || list.length === 0) return payload;
         let current = payload;
@@ -158,15 +204,47 @@ class ChatPluginHookBus {
         return current;
     }
 
-    /** 事件广播：fire-and-forget，async handler 的 rejection 也会被归因记录 */
+    /** 事件广播：对宿主仍是 fire-and-forget；需要参与 enrichment barrier 的 Promise 会被内部跟踪。 */
     emitEvent<P extends ChatPluginEventPoint>(point: P, payload: ChatPluginEventPayloadMap[P]): void {
+        let xhsSessionId: string | null = null;
+
+        if (point === "message.persisted") {
+            const message = (payload as ChatPluginEventPayloadMap["message.persisted"]).message;
+            if (message.mediaType?.startsWith("plugin:")) {
+                this.pluginMessageSessionById.set(message.id, message.sessionId);
+            }
+            if (message.role === "user" && message.mediaType === "plugin:xhs-card") {
+                xhsSessionId = message.sessionId;
+            }
+        } else if (point === "message.updated") {
+            const update = payload as ChatPluginEventPayloadMap["message.updated"];
+            const sessionId = this.pluginMessageSessionById.get(update.id);
+            if (sessionId && typeof window !== "undefined") {
+                // chat-room 已有这个外部消息同步入口。这里把插件异步 mediaData 更新接进去，
+                // 让 React 重新读取 storage；不再依赖插件用 querySelector/innerHTML 硬改 DOM。
+                window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId } }));
+            }
+            if (update.patch.mediaType !== undefined && !update.patch.mediaType?.startsWith("plugin:")) {
+                this.pluginMessageSessionById.delete(update.id);
+            }
+        } else if (point === "message.deleted") {
+            const deleted = payload as ChatPluginEventPayloadMap["message.deleted"];
+            this.pluginMessageSessionById.delete(deleted.id);
+        }
+
         const list = this.events.get(point);
         if (!list || list.length === 0) return;
         for (const handler of [...list]) {
             try {
                 const result = handler.fn(payload);
                 if (result instanceof Promise) {
-                    result.catch(e => this.reportFailure(handler.pluginId, point, e));
+                    const completion = Promise.resolve(result).then(
+                        () => { this.reportSuccess(handler.pluginId); },
+                        e => { this.reportFailure(handler.pluginId, point, e); },
+                    );
+                    if (xhsSessionId) this.trackXhsEnrichment(xhsSessionId, completion);
+                } else {
+                    this.reportSuccess(handler.pluginId);
                 }
             } catch (e) {
                 this.reportFailure(handler.pluginId, point, e);
