@@ -33,6 +33,7 @@ const mockSources = new Map([
     `],
     [resolve(repoRoot, "lib/chat-share.ts"), `
         export function formatXiaohongshuShareForPrompt() { return ""; }
+        export function formatXiaohongshuReaderCardForPrompt() { return ""; }
     `],
     [resolve(repoRoot, "lib/prompt-sanitizer.ts"), `
         export function stripStateAndInnerForPrompt(value) { return value; }

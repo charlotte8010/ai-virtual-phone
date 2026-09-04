@@ -27,6 +27,7 @@ import { formatShoppingPaymentRequestHistory } from "@/lib/shopping-payment-requ
 import { toCustomAppIconId } from "@/lib/custom-app-types";
 import { ChatPluginSlot } from "@/components/chat/chat-plugin-slot";
 import { CHAT_PLUGIN_SLOTS_CHANGED_EVENT, getChatPluginRuntime } from "@/lib/chat-plugin-runtime";
+import { areChatMessagesEqualForBubble } from "@/lib/chat-message-comparator";
 
 interface MessageBubbleProps {
     msg: ChatMessage;
@@ -134,24 +135,7 @@ export const MessageBubble = memo(function MessageBubble({ msg, onUpdate, charNa
     }
 }, (prev, next) => {
     // Skip function props (onUpdate, onSystemMessage, onShowDetail) — they're inline and always new
-    if (prev.msg !== next.msg) {
-        if (prev.msg.id !== next.msg.id) return false;
-        if (prev.msg.content !== next.msg.content) return false;
-        if (prev.msg.mediaType !== next.msg.mediaType) return false;
-        if (prev.msg.isRetracted !== next.msg.isRetracted) return false;
-        if (prev.msg.isTyping !== next.msg.isTyping) return false;
-        if (prev.msg.mediaData?.status !== next.msg.mediaData?.status) return false;
-        if (prev.msg.mediaData?.label !== next.msg.mediaData?.label) return false;
-        if (prev.msg.mediaData?.claimedBy?.length !== next.msg.mediaData?.claimedBy?.length) return false;
-        if (prev.msg.mediaData?.appName !== next.msg.mediaData?.appName) return false;
-        if (prev.msg.mediaData?.appCardTitle !== next.msg.mediaData?.appCardTitle) return false;
-        if (prev.msg.mediaData?.appCardBody !== next.msg.mediaData?.appCardBody) return false;
-        if (prev.msg.mediaData?.appCardLayout !== next.msg.mediaData?.appCardLayout) return false;
-        if (prev.msg.mediaData?.imageGenerationPrompt !== next.msg.mediaData?.imageGenerationPrompt) return false;
-        if (prev.msg.mediaData?.imageGenerationStatus !== next.msg.mediaData?.imageGenerationStatus) return false;
-        if (prev.msg.mediaData?.imageGenerationError !== next.msg.mediaData?.imageGenerationError) return false;
-        if (prev.msg.mediaUrl !== next.msg.mediaUrl) return false;
-    }
+    if (!areChatMessagesEqualForBubble(prev.msg, next.msg)) return false;
     if (prev.charName !== next.charName) return false;
     if (prev.userName !== next.userName) return false;
     if (prev.groupSize !== next.groupSize) return false;

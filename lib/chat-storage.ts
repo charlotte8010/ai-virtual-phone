@@ -14,6 +14,7 @@ import { emitChatPluginEvent, runChatPluginTransformSync } from "./chat-plugin-h
 import { parseAIResponse } from "./rich-message-parser";
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
 import { ingestCognitiveMessageEvent } from "./cognitive-memory-ingestion";
+import { dispatchChatMessagesUpdated } from "./chat-message-events";
 
 export const DEFAULT_VISION_IMAGE_PROMPT_LIMIT = 1;
 export const MAX_VISION_IMAGE_PROMPT_LIMIT = 20;
@@ -188,6 +189,29 @@ export type ChatMessage = {
         xiaohongshuImageAssetId?: string;
         xiaohongshuCoverIcon?: string;
         xiaohongshuTone?: string;
+        loading?: boolean;             // generic plugin card loading state
+        title?: string;                // generic plugin card title
+        author?: string;               // generic plugin card author
+        body?: string;                 // generic plugin card body
+        description?: string;          // generic plugin card description
+        tags?: string[];               // generic plugin card tags
+        commentItems?: Array<{
+            user?: string;
+            content?: string;
+            ipLocation?: string;
+            likeCount?: number;
+        }>;
+        xhsReaderTitle?: string;
+        xhsReaderAuthor?: string;
+        xhsReaderBody?: string;
+        xhsReaderDescription?: string;
+        xhsReaderTags?: string[];
+        xhsReaderComments?: Array<{
+            user?: string;
+            content?: string;
+            ipLocation?: string;
+            likeCount?: number;
+        }>;
         callDuration?: string;    // 通话时长（如 05:23）
         voiceDuration?: number;   // 语音条时长（秒）
         synthesizedFromText?: string; // 语音条当前音频对应的合成文本
@@ -1807,6 +1831,7 @@ export function updateChatMessage(
         saveChatSessions(sessions);
     }
 
+    dispatchChatMessagesUpdated(updated.sessionId, updated.id);
     emitChatPluginEvent("message.updated", { id: messageId, patch });
 
     return updated;

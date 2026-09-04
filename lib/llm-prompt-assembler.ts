@@ -10,7 +10,7 @@ import type { RecentBlock, UnifiedRecentItem } from "./short-term-assembler";
 import { readDwellingLayoutCache } from "./dwelling-storage";
 import { formatDwellingContext } from "./dwelling-engine";
 import { matchesActiveTags } from "./content-tag-utils";
-import { formatXiaohongshuShareForPrompt } from "./chat-share";
+import { formatXiaohongshuReaderCardForPrompt, formatXiaohongshuShareForPrompt } from "./chat-share";
 import { stripStateAndInnerForPrompt } from "./prompt-sanitizer";
 import { formatPromptTimestamp, getPromptTimestampOptionsForTimeContext, resolvePromptTimeAware, type PromptTimestampOptions } from "./prompt-time";
 import { formatCharacterRelationsForPrompt } from "./character-world-storage";
@@ -1232,6 +1232,16 @@ export function formatRichMediaForHistory(msg: ChatMessage, userName: string, ch
                 title: d?.xiaohongshuTitle,
                 body: d?.xiaohongshuBody,
                 description: d?.xiaohongshuDescription,
+            });
+        case "plugin:xhs-card":
+            if (d?.loading === true && !d?.xhsReaderBody && !d?.body) return msg.content;
+            return formatXiaohongshuReaderCardForPrompt({
+                author: d?.xhsReaderAuthor || d?.author,
+                title: d?.xhsReaderTitle || d?.title,
+                body: d?.xhsReaderBody || d?.body,
+                description: d?.xhsReaderDescription || d?.description,
+                tags: d?.xhsReaderTags || d?.tags,
+                comments: d?.xhsReaderComments || d?.commentItems,
             });
         case "accept_red_packet":
             if (isGroup && d?.claimer && d?.owner) return `[${d.claimer}领取了${d.owner}的红包]`;

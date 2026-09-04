@@ -87,6 +87,7 @@ import { extractTextToolDirectiveText } from "@/lib/text-tool-protocol";
 import { emitChatPluginEvent, getChatPluginHookBus, runChatPluginTransform } from "@/lib/chat-plugin-hooks";
 import { CHAT_PLUGIN_TOAST_EVENT, getChatPluginRuntime } from "@/lib/chat-plugin-runtime";
 import { ChatPluginSlot } from "@/components/chat/chat-plugin-slot";
+import { CHAT_MESSAGES_UPDATED_EVENT } from "@/lib/chat-message-events";
 
 // ── Call system message detection ──────────────────────────
 // Call messages are stored with user/assistant role for correct prompt alternation,
@@ -1505,8 +1506,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 syncMessagesFromStorage();
             }
         };
-        window.addEventListener("chat-messages-updated", onExternalMessageUpdate);
-        return () => window.removeEventListener("chat-messages-updated", onExternalMessageUpdate);
+        window.addEventListener(CHAT_MESSAGES_UPDATED_EVENT, onExternalMessageUpdate);
+        return () => window.removeEventListener(CHAT_MESSAGES_UPDATED_EVENT, onExternalMessageUpdate);
     }, [session.id, syncMessagesFromStorage]);
 
     // --- Background generation: reload messages when a bg API call completes ---
