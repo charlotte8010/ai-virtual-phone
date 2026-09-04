@@ -25,6 +25,8 @@ const SHORTCUT_VISION_OFF_NOTE = "（系统记录：未配置或未启用图像�
 const ILINK_BASE = "https://ilinkai.weixin.qq.com";
 const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 const BASE_INFO = { channel_version: "1.0.2" };
+// iLink-App-ClientVersion is a uint32-encoded semantic version (1.0.0 => 65536).
+const ILINK_APP_CLIENT_VERSION = "65536";
 // 锁 TTL 必须远小于「函数被平台掐掉后到下次可重试」的可接受等待：
 // 云函数被墙钟杀掉时 finally 不会执行、锁无法主动释放，只能等 TTL 过期。
 const AUTO_REPLY_LOCK_TTL_MS = 3 * 60 * 1000;
@@ -1929,7 +1931,7 @@ function makeIlinkHeaders(botToken) {
   const headers = {
     "Content-Type": "application/json",
     "iLink-App-Id": "bot",
-    "iLink-App-ClientVersion": "1",
+    "iLink-App-ClientVersion": ILINK_APP_CLIENT_VERSION,
   };
   if (botToken) {
     headers.Authorization = `Bearer ${botToken}`;

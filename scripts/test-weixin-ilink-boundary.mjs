@@ -24,6 +24,7 @@ try {
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "https://ilinkai.weixin.qq.com/ilink/bot/msg/notifystart");
   assert.equal(requests[0].init.headers["iLink-App-Id"], "bot");
+  assert.equal(requests[0].init.headers["iLink-App-ClientVersion"], "65536");
   assert.equal(requests[0].init.headers.Authorization, "Bearer wc_live_test_token");
   assert.equal(requests[0].init.headers.AuthorizationType, "ilink_bot_token");
   assert.deepEqual(JSON.parse(requests[0].init.body), {
