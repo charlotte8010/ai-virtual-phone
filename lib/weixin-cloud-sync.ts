@@ -638,9 +638,18 @@ export async function setWeixinCloudAssistantScheduled(enabled: boolean): Promis
   return { scheduled: data.scheduled };
 }
 
-/** 从浏览器直接调用一次云函数，验证部署是否成功。 */
-export async function testWeixinCloudAssistantOnce(): Promise<{ ok: boolean; sent: number; error?: string }> {
+/** 从浏览器直接调用一次云函数，验证部署和微信入站状态。 */
+export async function testWeixinCloudAssistantOnce(): Promise<{
+  ok: boolean;
+  polled?: number;
+  received?: number;
+  stored?: number;
+  sent: number;
+  error?: string;
+}> {
   const config = requireCloudBackupConfig();
+  // 云函数优先加载桶内核心；测试前同步一次，避免已部署的 wrapper 继续执行旧逻辑。
+  await syncWeixinCloudFunctionCore(config).catch(() => {});
   const token = await ensureWeixinCloudCronSecret();
   const url = buildWeixinCloudAssistantFunctionUrl(config);
 
@@ -657,7 +666,14 @@ export async function testWeixinCloudAssistantOnce(): Promise<{ ok: boolean; sen
     throw new Error("无法访问云函数。请确认已部署名为 weixin-assistant 的 Edge Function，并已关闭该函数的 JWT 校验。");
   }
 
-  const data = await res.json().catch(() => null) as { ok?: boolean; sent?: number; error?: string } | null;
+  const data = await res.json().catch(() => null) as {
+    ok?: boolean;
+    polled?: number;
+    received?: number;
+    stored?: number;
+    sent?: number;
+    error?: string;
+  } | null;
   if (res.status === 401) {
     throw new Error(data?.error === "invalid_token"
       ? "云函数密钥不匹配，请重新复制定时 SQL 并在 SQL Editor 里重新执行。"
@@ -666,7 +682,14 @@ export async function testWeixinCloudAssistantOnce(): Promise<{ ok: boolean; sen
   if (!res.ok || !data?.ok) {
     throw new Error(data?.error || `云函数返回 HTTP ${res.status}`);
   }
-  return { ok: true, sent: Number(data.sent) || 0, error: data.error };
+  return {
+    ok: true,
+    polled: Number(data.polled) || 0,
+    received: Number(data.received) || 0,
+    stored: Number(data.stored) || 0,
+    sent: Number(data.sent) || 0,
+    error: data.error,
+  };
 }
 
 export function buildWeixinLocalAssistantConfigCode(

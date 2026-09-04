@@ -67,6 +67,43 @@ function remainingReplyBudgetMs() {
 }
 
 const assistantInstanceId = randomUUID();
+const ilinkStartNotifiedAt = new Map();
+const ILINK_START_NOTIFY_TTL_MS = 5 * 60 * 1000;
+
+export function getIlinkErrorCode(data) {
+  const code = typeof data?.error_code === "number"
+    ? data.error_code
+    : typeof data?.errcode === "number"
+      ? data.errcode
+      : typeof data?.ret === "number"
+        ? data.ret
+        : undefined;
+  return code !== undefined && code !== 0 ? code : undefined;
+}
+
+export async function notifyIlinkStart(botToken) {
+  return callIlinkJson("/ilink/bot/msg/notifystart", botToken, { base_info: BASE_INFO }, "POST");
+}
+
+async function ensureIlinkStartNotified(botId, botToken) {
+  if (!botId || !botToken) return "missing_bot_token";
+  const lastNotifiedAt = ilinkStartNotifiedAt.get(botId) || 0;
+  if (Date.now() - lastNotifiedAt < ILINK_START_NOTIFY_TTL_MS) return;
+
+  try {
+    const data = await notifyIlinkStart(botToken);
+    const errorCode = getIlinkErrorCode(data);
+    if (errorCode !== undefined) {
+      console.warn(`[weixin-assistant] notifystart error_code=${errorCode} bot=${botId}`);
+      return `iLink notifystart error_code ${errorCode}`;
+    }
+    ilinkStartNotifiedAt.set(botId, Date.now());
+  } catch (err) {
+    const message = `iLink notifystart failed: ${errorMessage(err)}`;
+    console.warn(`[weixin-assistant] ${message} bot=${botId}`);
+    return message;
+  }
+}
 
 export async function pollOnce(env, targetBotId, options = {}) {
   const deadlineAt = Number(options?.deadlineAt) || 0;
@@ -86,6 +123,7 @@ export async function pollOnce(env, targetBotId, options = {}) {
     const runtime = await loadRuntimePackage(env, item);
     const state = await loadBotState(env, item.botId);
     const polledAt = new Date().toISOString();
+    const ilinkStartError = await ensureIlinkStartNotified(item.botId, runtime.bot?.botToken);
 
     const data = await callIlinkJson(
       "/ilink/bot/getupdates",
@@ -95,7 +133,7 @@ export async function pollOnce(env, targetBotId, options = {}) {
     );
 
     const messages = Array.isArray(data.msgs) ? data.msgs : [];
-    const ilinkErrorCode = typeof data.error_code === "number" && data.error_code !== 0 ? data.error_code : undefined;
+    const ilinkErrorCode = getIlinkErrorCode(data);
     if (ilinkErrorCode !== undefined) {
       console.warn(`[weixin-assistant] getupdates error_code=${ilinkErrorCode} bot=${item.botId} 响应字段=${Object.keys(data).join(",")}`);
     }
@@ -104,9 +142,9 @@ export async function pollOnce(env, targetBotId, options = {}) {
     }
     if (data.get_updates_buf) state.getUpdatesBuf = data.get_updates_buf;
     state.lastPolledAt = polledAt;
-    state.lastError = data.error_code === -14
+    state.lastError = ilinkErrorCode === -14
       ? "Token 已过期，请重新扫码"
-      : ilinkErrorCode !== undefined ? `iLink error_code ${ilinkErrorCode}` : undefined;
+      : ilinkErrorCode !== undefined ? `iLink error_code ${ilinkErrorCode}` : ilinkStartError;
     await saveBotState(env, item.botId, state);
 
     let storedMessages = 0;
@@ -144,8 +182,9 @@ export async function pollOnce(env, targetBotId, options = {}) {
       polledAt,
       received: messages.length,
       stored: storedMessages,
-      tokenExpired: data.error_code === -14,
+      tokenExpired: ilinkErrorCode === -14,
       ilinkErrorCode,
+      ilinkStartError,
       autoReply,
     });
   }
@@ -1904,7 +1943,11 @@ async function callIlinkJson(path, botToken, body, method = "POST") {
 }
 
 function makeIlinkHeaders(botToken) {
-  const headers = { "Content-Type": "application/json", "iLink-App-ClientVersion": "1" };
+  const headers = {
+    "Content-Type": "application/json",
+    "iLink-App-Id": "bot",
+    "iLink-App-ClientVersion": "1",
+  };
   if (botToken) {
     headers.Authorization = `Bearer ${botToken}`;
     headers.AuthorizationType = "ilink_bot_token";
@@ -1968,7 +2011,7 @@ export async function sendProactiveText(env, botId, text, replyAnchor) {
   let sent = 0;
   for (const part of parts) {
     const data = await sendIlinkTextMessage(botToken, raw, part);
-    const errorCode = typeof data?.error_code === "number" && data.error_code !== 0 ? data.error_code : undefined;
+    const errorCode = getIlinkErrorCode(data);
     if (errorCode !== undefined) {
       if (sent === 0) throw new Error(`ilink error_code ${errorCode}`);
       break;
@@ -2548,6 +2591,7 @@ Deno.serve(async (req) => {
       firstError = firstError || rows.map(row =>
         row.autoReply?.error
         || (row.tokenExpired ? "Token 已过期，请重新扫码" : "")
+        || row.ilinkStartError
         || (row.ilinkErrorCode !== undefined ? `iLink error_code ${row.ilinkErrorCode}` : ""),
       ).find(Boolean);
       if (!loopMode) break;
@@ -2571,6 +2615,7 @@ Deno.serve(async (req) => {
         characterId: row.characterId,
         received: row.received,
         ilinkErrorCode: row.ilinkErrorCode,
+        ilinkStartError: row.ilinkStartError,
         autoReplyStatus: row.autoReply?.status,
       })),
       error: firstError,

@@ -131,11 +131,16 @@ export function WeixinSettings({ onOpenCloudServices }: { onOpenCloudServices?: 
         try {
             const result = await testWeixinCloudAssistantOnce();
             await refreshCloudHeartbeat().catch(() => null);
+            const received = Number(result.received) || 0;
+            const stored = Number(result.stored) || 0;
+            const sent = Number(result.sent) || 0;
             setCloudAssistantNotice({
-                ok: true,
+                ok: !result.error && received > 0,
                 text: result.error
                     ? `云函数已运行，但轮询报错：${result.error}`
-                    : "云端测试成功！云函数已正常轮询微信消息。定时 SQL 执行后即可 24 小时自动回复。",
+                    : received > 0
+                        ? `云端测试收到 ${received} 条微信消息，已存储 ${stored} 条，已发送 ${sent} 条回复。`
+                        : `云函数已运行，但本轮没有收到微信消息（received=0，stored=${stored}，sent=${sent}）。请检查微信账号绑定和 iLink 会话状态。`,
             });
         } catch (err) {
             setCloudAssistantNotice({ ok: false, text: err instanceof Error ? err.message : String(err) });

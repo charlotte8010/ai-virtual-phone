@@ -267,6 +267,7 @@ Deno.serve(async (req) => {
       firstError = firstError || rows.map(row =>
         row.autoReply?.error
         || (row.tokenExpired ? "Token 已过期，请重新扫码" : "")
+        || row.ilinkStartError
         || (row.ilinkErrorCode !== undefined ? `iLink error_code ${row.ilinkErrorCode}` : ""),
       ).find(Boolean);
       if (!loopMode) break;
@@ -290,6 +291,7 @@ Deno.serve(async (req) => {
         characterId: row.characterId,
         received: row.received,
         ilinkErrorCode: row.ilinkErrorCode,
+        ilinkStartError: row.ilinkStartError,
         autoReplyStatus: row.autoReply?.status,
       })),
       error: firstError,
