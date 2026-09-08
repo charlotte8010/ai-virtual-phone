@@ -68,6 +68,9 @@ assert.match(chatStorageSource, /persistedSession\.isGroup/);
 assert.match(chatStorageSource, /sourceDetail:\s*["']group["']/);
 assert.match(chatStorageSource, /persistenceConfirmed:\s*true/);
 assert.match(chatStorageSource, /participantIds/);
+const messageWriteIndex = chatStorageSource.indexOf("dbPutMessage(newMsg)");
+const groupIngestionIndex = chatStorageSource.indexOf('sourceDetail: "group"');
+assert.ok(messageWriteIndex >= 0 && messageWriteIndex < groupIngestionIndex, "group ingestion must follow dbPutMessage");
 assert.match(chatMemoryEventSource, /sourceDetail:\s*["']direct["']\s*\|\s*["']group["']/);
 
 globalThis.window = {};
