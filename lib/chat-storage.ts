@@ -1160,6 +1160,14 @@ function createMessageId(): string {
     return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
+function shouldIngestGroupCognitiveMessage(message: ChatMessage): boolean {
+    if (message.role === "user") return true;
+    if (message.role !== "assistant" || !message.content.trim()) return false;
+    // Native/text tool-call carrier rows are persistence records, not user-visible
+    // conversational events. The final assistant reply is ingested when it is pushed.
+    return message.mediaType !== "tool_call" && !message.nativeToolCalls?.length;
+}
+
 export function createResponseBatchId(): string {
     return `resp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -1219,7 +1227,7 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
     const persistedSession = _sessionsCache.find(session => session.id === newMsg.sessionId)
         ?? loadChatSessions().find(session => session.id === newMsg.sessionId);
     if (persistedSession && (newMsg.role === "user" || newMsg.role === "assistant")) {
-        if (persistedSession.isGroup) {
+        if (persistedSession.isGroup && shouldIngestGroupCognitiveMessage(newMsg)) {
             const charactersById = new Map(loadCharacters().map(character => [character.id, character]));
             for (const characterId of [...new Set(persistedSession.participantIds || [])]) {
                 const character = charactersById.get(characterId);

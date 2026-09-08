@@ -785,9 +785,6 @@ export async function generateGroupChatCompletion(
         promptProfile: options?.promptProfile,
         apiConfigId: options?.apiConfigId,
     });
-    const chars = loadCharacters();
-    const participantIds = session.participantIds || [];
-
     const MAX_TOOL_ROUNDS = 5;
     const meta = { characterName: `群聊:${session.groupName || "群聊"}` };
     let finalRawOutput = "";
