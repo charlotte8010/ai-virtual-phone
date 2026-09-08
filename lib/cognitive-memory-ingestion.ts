@@ -7,6 +7,7 @@ export type CognitiveMessageIngestionInput = {
     characterId: string;
     characterName: string;
     message: Pick<ChatMessage, "id" | "sessionId" | "createdAt" | "content" | "role">;
+    sourceDetail?: "direct" | "group";
 };
 
 type CognitiveMessageIngestionOptions = {
@@ -55,7 +56,7 @@ function scheduleSummarization(input: CognitiveMessageIngestionInput): void {
 
 function buildEvent(input: CognitiveMessageIngestionInput) {
     if (input.message.role !== "user" && input.message.role !== "assistant") return null;
-    return toFutureIntentEvent(input.message, "direct");
+    return toFutureIntentEvent(input.message, input.sourceDetail ?? "direct");
 }
 
 /** Run the existing Chat cognitive lifecycle for one exact persisted message. */

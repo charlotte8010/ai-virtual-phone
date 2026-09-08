@@ -64,10 +64,9 @@ import {
     resolveStatusRegionComposition,
     resolveStatusRegionFullExample,
 } from "./chat-status-region";
-import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
+import { loadMemoryConfig } from "./memory-storage";
 import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
-import { maybeRunSummarization } from "./memory-summarizer";
 import { prepareShortTermContext, prepareGroupShortTermContext } from "./short-term-assembler";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { getCustomStickerExample, loadCustomStickers } from "./custom-sticker-storage";
@@ -250,41 +249,6 @@ export function buildEditableGroupRoundText(
         })
         .filter(Boolean)
         .join("\n\n");
-}
-
-function scheduleGroupMemorySummarization(
-    participantIds: string[],
-    chars: ReturnType<typeof loadCharacters>,
-    history: ChatMessage[],
-    replyCount: number,
-): void {
-    const lastMessage = history[history.length - 1];
-    const userEventCount = lastMessage?.role === "user" ? 1 : 0;
-    const totalNewEvents = userEventCount + replyCount;
-    if (totalNewEvents <= 0) return;
-
-    const uniqueParticipantIds = [...new Set(participantIds)];
-    for (const characterId of uniqueParticipantIds) {
-        const character = chars.find(c => c.id === characterId);
-        if (!character) continue;
-
-        const recentMessages = history.slice(-totalNewEvents);
-        for (let i = 0; i < totalNewEvents; i++) {
-            const message = recentMessages[i];
-            if (!message) continue;
-            incrementEventCounter(characterId, {
-                id: message.id,
-                sourceApp: "chat",
-                sourceDetail: "group",
-                timestamp: message.createdAt,
-                content: message.content,
-                sessionId: message.sessionId,
-            });
-        }
-
-        maybeRunSummarization(characterId, character.name)
-            .catch(err => console.warn("[GroupChat] Memory counter/summarization failed:", err));
-    }
 }
 
 /**
@@ -1094,10 +1058,6 @@ export async function generateGroupChatCompletion(
         if (cleanText.trim()) {
             finalResults.push({ ...r, responseText: cleanText });
         }
-    }
-
-    if (!options?.skipMemorySummarization) {
-        scheduleGroupMemorySummarization(participantIds, chars, history, finalResults.length);
     }
 
     return finalResults;

@@ -1218,14 +1218,27 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
 
     const persistedSession = _sessionsCache.find(session => session.id === newMsg.sessionId)
         ?? loadChatSessions().find(session => session.id === newMsg.sessionId);
-    if (persistedSession && !persistedSession.isGroup
-        && (newMsg.role === "user" || newMsg.role === "assistant")) {
-        const characterName = loadCharacters().find(item => item.id === persistedSession.contactId)?.name || "角色";
-        void ingestCognitiveMessageEvent({
-            characterId: persistedSession.contactId,
-            characterName,
-            message: newMsg,
-        });
+    if (persistedSession && (newMsg.role === "user" || newMsg.role === "assistant")) {
+        if (persistedSession.isGroup) {
+            const charactersById = new Map(loadCharacters().map(character => [character.id, character]));
+            for (const characterId of [...new Set(persistedSession.participantIds || [])]) {
+                const character = charactersById.get(characterId);
+                if (!character) continue;
+                void ingestCognitiveMessageEvent({
+                    characterId,
+                    characterName: character.name,
+                    message: newMsg,
+                    sourceDetail: "group",
+                }, { persistenceConfirmed: true });
+            }
+        } else {
+            const characterName = loadCharacters().find(item => item.id === persistedSession.contactId)?.name || "角色";
+            void ingestCognitiveMessageEvent({
+                characterId: persistedSession.contactId,
+                characterName,
+                message: newMsg,
+            });
+        }
     }
 
     if (typeof window !== "undefined") {

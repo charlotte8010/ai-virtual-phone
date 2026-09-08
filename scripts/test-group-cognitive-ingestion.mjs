@@ -160,7 +160,7 @@ try {
     assert.equal(globalThis.__groupCognitiveCounters.length, 6);
 
     // Preview/debug code must remain side-effect free by construction.
-    const previewStart = groupEngineSource.indexOf("export async function previewGroupChatCompletion");
+    const previewStart = groupEngineSource.search(/export async function previewGroupPrompt(?:Payload|RequestSnapshot)/);
     assert.notEqual(previewStart, -1);
     const previewSource = groupEngineSource.slice(previewStart);
     assert.doesNotMatch(previewSource, /ingestCognitiveMessageEvent|incrementEventCounter|scheduleGroupMemorySummarization/);

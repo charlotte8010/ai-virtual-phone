@@ -89,7 +89,7 @@ assert.match(memoryStorageSource, /await dbWaitForMessagePersistence\(event\.id\
 assert.match(memoryStorageSource, /const resolvedCharacterId = contact\?\.characterId/);
 assert.match(memoryStorageSource, /incrementEventCounterNow\(resolvedCharacterId, event\)/);
 assert.match(cognitiveIngestionSource, /incrementEventCounter\(input\.characterId, event\)/);
-assert.match(cognitiveIngestionSource, /toFutureIntentEvent\(input\.message, "direct"\)/);
+assert.match(cognitiveIngestionSource, /toFutureIntentEvent\(input\.message, input\.sourceDetail \?\? "direct"\)/);
 assert.match(cognitiveIngestionSource, /maybeRunSummarization/);
 assert.doesNotMatch(cognitiveIngestionSource, /loadChatMessages\(|getLastVisibleSessionMessage\(/);
 assert.doesNotMatch(chatEngineSource, /incrementEventCounter/);
