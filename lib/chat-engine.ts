@@ -55,7 +55,7 @@ import {
 import { setDebugPromptSnapshot, type DebugPromptSnapshot } from "./debug-store";
 import { extractFinishReason } from "./api-helpers";
 import { fetchLlmPayload } from "./llm-http";
-import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
+import { loadMemoryConfig } from "./memory-storage";
 import { createMemoryRecallCallback, retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
