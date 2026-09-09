@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import QRCode from "qrcode";
 
 import { loadCharacters } from "@/lib/character-storage";
 import { CLOUD_BACKUP_BUCKET, normalizeBackupUrl } from "@/lib/cloud-backup/config";
@@ -30,6 +31,20 @@ import {
 } from "@/lib/reality-bridge/storage";
 import type { BridgeRule } from "@/lib/reality-bridge/types";
 import { createShortcutCommand, loadRecentShortcutCommands, type ShortcutCommand } from "@/lib/shortcut-command-client";
+import {
+  ANDROID_BRIDGE_ACTIONS,
+  buildAndroidPairingUri,
+  createAndroidPairing,
+  loadAndroidDevices,
+  loadAndroidResults,
+  sendAndroidCommand,
+  waitForAndroidResult,
+  type AndroidBridgeAction,
+  type AndroidCommand,
+  type AndroidDevice,
+  type AndroidPairingPayload,
+  type AndroidResult,
+} from "@/lib/android-reality-bridge";
 import { enableOfflinePush, isShellEnvironment } from "@/lib/push-client";
 import {
   isPersonalPushCloudActive,
@@ -245,7 +260,7 @@ export function RealityBridgeApp({ onClose, onNotice }: {
   const [bridgeToken, setBridgeToken] = useState("");
   const [closing, setClosing] = useState(false);
   const [spinTurns, setSpinTurns] = useState(0);
-  const [mainSec, setMainSec] = useState<"rules" | "shortcuts" | "queries" | "screen">("rules");
+  const [mainSec, setMainSec] = useState<"rules" | "shortcuts" | "queries" | "screen" | "android">("rules");
   const [screenChat, setScreenChat] = useState<ScreenChatSettings>(() => loadScreenChatSettings());
   const [editingScreenChat, setEditingScreenChat] = useState<ScreenChatSettings | null>(null);
   const [histSec, setHistSec] = useState<"feed" | "commands">("feed");
@@ -263,15 +278,136 @@ export function RealityBridgeApp({ onClose, onNotice }: {
   const [screenWizMax, setScreenWizMax] = useState(1);
   const [dataSnapshot, setDataSnapshot] = useState<{ text: string; updatedAt?: string } | "none" | null>(null);
   const [dataSnapshotBusy, setDataSnapshotBusy] = useState(false);
+  const [androidDevices, setAndroidDevices] = useState<AndroidDevice[]>([]);
+  const [androidDevicesBusy, setAndroidDevicesBusy] = useState(false);
+  const [androidPairBusy, setAndroidPairBusy] = useState(false);
+  const [androidAnonKey, setAndroidAnonKey] = useState("");
+  const [androidPairing, setAndroidPairing] = useState<AndroidPairingPayload | null>(null);
+  const [androidPairingUri, setAndroidPairingUri] = useState("");
+  const [androidQrDataUrl, setAndroidQrDataUrl] = useState("");
+  const [androidSelectedDeviceId, setAndroidSelectedDeviceId] = useState("");
+  const [androidAction, setAndroidAction] = useState<AndroidBridgeAction>("show_notification");
+  const [androidPayloadText, setAndroidPayloadText] = useState(JSON.stringify({
+    title: "Float",
+    body: "Android Reality Bridge 已连接",
+  }, null, 2));
+  const [androidCommandBusy, setAndroidCommandBusy] = useState(false);
+  const [androidPendingCommand, setAndroidPendingCommand] = useState<AndroidCommand | null>(null);
+  const [androidLastResult, setAndroidLastResult] = useState<AndroidResult | null>(null);
+  const [androidRecentResults, setAndroidRecentResults] = useState<AndroidResult[]>([]);
   const characters = useMemo(() => loadCharacters().map(c => ({ id: c.id, name: c.name })), []);
   const charName = useCallback((id?: string) => characters.find(c => c.id === id)?.name ?? "角色", [characters]);
   const { config, ready } = bridgeConnection();
+
+  const refreshAndroidDevices = useCallback(async (quiet = false): Promise<AndroidDevice[]> => {
+    if (!isPersonalPushCloudActive()) {
+      if (!quiet) onNotice?.("请先部署并连接个人云，Android Bridge 与现有现实桥共用个人云");
+      return [];
+    }
+    setAndroidDevicesBusy(true);
+    try {
+      const devices = await loadAndroidDevices();
+      setAndroidDevices(devices);
+      setAndroidSelectedDeviceId(previous => previous && devices.some(device => device.deviceId === previous)
+        ? previous
+        : devices[0]?.deviceId || "");
+      return devices;
+    } catch (err) {
+      if (!quiet) onNotice?.(err instanceof Error ? err.message : String(err));
+      return [];
+    } finally {
+      setAndroidDevicesBusy(false);
+    }
+  }, [onNotice]);
+
+  const refreshAndroidResults = useCallback(async (deviceId: string) => {
+    if (!deviceId || !isPersonalPushCloudActive()) return;
+    try {
+      setAndroidRecentResults(await loadAndroidResults(20, deviceId));
+    } catch {
+      // The device list remains useful when an older personal gateway has not
+      // deployed the result table yet; surface the error on an explicit action.
+    }
+  }, []);
+
+  const generateAndroidPairing = useCallback(async () => {
+    if (androidPairBusy) return;
+    const anonKey = androidAnonKey.trim();
+    if (!anonKey) {
+      onNotice?.("请填当前个人云项目的 anon/publishable key；不能填 service_role key");
+      return;
+    }
+    setAndroidPairBusy(true);
+    try {
+      const pairing = await createAndroidPairing(anonKey);
+      const uri = buildAndroidPairingUri(pairing);
+      const qr = await QRCode.toDataURL(uri, { width: 280, margin: 2, errorCorrectionLevel: "M" });
+      setAndroidPairing(pairing);
+      setAndroidPairingUri(uri);
+      setAndroidQrDataUrl(qr);
+      onNotice?.("Android 配对码已生成（仅短期有效，使用一次）");
+    } catch (err) {
+      onNotice?.(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAndroidPairBusy(false);
+    }
+  }, [androidAnonKey, androidPairBusy, onNotice]);
+
+  const dispatchAndroidCommand = useCallback(async () => {
+    if (androidCommandBusy) return;
+    const device = androidDevices.find(item => item.deviceId === androidSelectedDeviceId);
+    if (!device) {
+      onNotice?.("请先选择已配对的 Android 设备");
+      return;
+    }
+    let payload: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(androidPayloadText) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("动作参数必须是 JSON 对象");
+      payload = parsed as Record<string, unknown>;
+    } catch (err) {
+      onNotice?.(err instanceof Error ? err.message : "动作参数不是有效 JSON");
+      return;
+    }
+    setAndroidCommandBusy(true);
+    setAndroidLastResult(null);
+    try {
+      const command = await sendAndroidCommand({
+        deviceId: device.deviceId,
+        action: androidAction,
+        payload,
+      });
+      setAndroidPendingCommand(command);
+      onNotice?.(`已下发 ${androidAction}，等待 Android 回传结果`);
+      const result = await waitForAndroidResult(command);
+      setAndroidPendingCommand(null);
+      setAndroidLastResult(result);
+      if (!result) onNotice?.("Android 命令等待超时；设备上线后可在结果记录里查看");
+      else onNotice?.(result.status === "success" ? "Android 动作已完成" : `Android 动作${result.status === "rejected" ? "被拒绝" : "失败"}`);
+      await refreshAndroidResults(device.deviceId);
+    } catch (err) {
+      setAndroidPendingCommand(null);
+      onNotice?.(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAndroidCommandBusy(false);
+    }
+  }, [androidAction, androidCommandBusy, androidDevices, androidPayloadText, androidSelectedDeviceId, onNotice, refreshAndroidResults]);
 
   useEffect(() => {
     const refresh = () => setFeed(loadBridgeFeed());
     window.addEventListener(REALITY_BRIDGE_FEED_UPDATED_EVENT, refresh);
     return () => window.removeEventListener(REALITY_BRIDGE_FEED_UPDATED_EVENT, refresh);
   }, []);
+
+  useEffect(() => {
+    if (mainSec !== "android") return;
+    void refreshAndroidDevices(true);
+  }, [mainSec, refreshAndroidDevices]);
+
+  useEffect(() => {
+    if (mainSec !== "android" || !androidSelectedDeviceId) return;
+    void refreshAndroidResults(androidSelectedDeviceId);
+  }, [androidSelectedDeviceId, mainSec, refreshAndroidResults]);
 
 
   useEffect(() => {
@@ -905,17 +1041,17 @@ export function RealityBridgeApp({ onClose, onNotice }: {
           {tab === "main" ? (
             <section>
               <div className="rb-hello">
-                <h3>iOS现实桥</h3>
+                <h3>{mainSec === "android" ? "Android Reality Bridge" : "iOS现实桥"}</h3>
                 <button
                   type="button"
                   className="rb-add"
-                  disabled={mainSec === "screen" && Boolean(screenChat.characterId)}
-                  aria-label={mainSec === "rules" ? "新建联动" : mainSec === "shortcuts" ? "新建快捷动作" : mainSec === "queries" ? "新建数据项" : screenChat.characterId ? "屏幕速聊已配置" : "配置屏幕速聊"}
+                  disabled={mainSec === "android" || (mainSec === "screen" && Boolean(screenChat.characterId))}
+                  aria-label={mainSec === "rules" ? "新建联动" : mainSec === "shortcuts" ? "新建快捷动作" : mainSec === "queries" ? "新建数据项" : mainSec === "android" ? "Android Bridge" : screenChat.characterId ? "屏幕速聊已配置" : "配置屏幕速聊"}
                   onClick={() => {
                     if (mainSec === "rules") openRuleEditor(newRule(), false);
                     else if (mainSec === "shortcuts") openShortcutEditor(newShortcutAction(), false);
                     else if (mainSec === "queries") openDataItemEditor(newDataItem(), false);
-                    else openScreenChatEditor(false);
+                    else if (mainSec === "screen") openScreenChatEditor(false);
                   }}
                 >＋</button>
               </div>
@@ -990,6 +1126,7 @@ export function RealityBridgeApp({ onClose, onNotice }: {
                       <button type="button" className={`rb-chip${mainSec === "shortcuts" ? " active" : ""}`} onClick={() => setMainSec("shortcuts")}>快捷动作</button>
                       <button type="button" className={`rb-chip${mainSec === "queries" ? " active" : ""}`} onClick={() => setMainSec("queries")}>主动查询</button>
                       <button type="button" className={`rb-chip${mainSec === "screen" ? " active" : ""}`} onClick={() => setMainSec("screen")}>屏幕速聊</button>
+                      <button type="button" className={`rb-chip${mainSec === "android" ? " active" : ""}`} onClick={() => setMainSec("android")}>Android Bridge</button>
                     </div>
                   </div>
                   {mainSec === "rules" ? (rules.length === 0 ? (
@@ -1127,6 +1264,115 @@ export function RealityBridgeApp({ onClose, onNotice }: {
                         <button type="button" className="rb-btn" onClick={() => openScreenChatEditor(false)}>开始配置</button>
                       </div>
                     )
+                  ) : null}
+
+                  {mainSec === "android" ? (
+                    <div className="rb-android-panel">
+                      <div className="rb-card" style={{ marginBottom: 12 }}>
+                        <div className="rb-feed-head">
+                          <b>Android Reality Bridge</b>
+                          <span className={personalPushActive ? "rb-type" : "rb-type warn"}>{personalPushActive ? "个人云通道" : "需要个人云"}</span>
+                        </div>
+                        <p className="rb-help">Android Companion 与 iOS 现实桥并列工作。Phase 1 只下发六个安全原生动作，不读取通知、不使用 Accessibility、不控制屏幕。</p>
+                        <label>个人云 anon / publishable key
+                          <input
+                            type="password"
+                            value={androidAnonKey}
+                            autoComplete="off"
+                            placeholder="不能填 service_role key"
+                            onChange={event => setAndroidAnonKey(event.target.value)}
+                          />
+                        </label>
+                        <p className="rb-hint">它会进入短期配对二维码；service_role key 只留在个人云网关，永远不会写入二维码。</p>
+                        <button type="button" className="rb-btn" disabled={androidPairBusy || !personalPushActive} onClick={() => void generateAndroidPairing()}>
+                          {androidPairBusy ? "生成中…" : "生成 Android 配对码"}
+                        </button>
+                        {androidPairing && androidPairingUri ? (
+                          <div style={{ marginTop: 14, display: "grid", gap: 8, justifyItems: "start" }}>
+                            {androidQrDataUrl ? <img src={androidQrDataUrl} width={220} height={220} alt="Android Bridge 配对二维码" /> : null}
+                            <p className="rb-hint">请在 Android Companion 的配对页扫描二维码，或复制深链。有效期至 {new Date(androidPairing.expiresAt).toLocaleTimeString()}，只能使用一次。</p>
+                            <div className="rb-code" onClick={() => copy(androidPairingUri, "Android 配对深链")}>
+                              <code>{androidPairingUri}</code><span className="rb-copy">复制</span>
+                            </div>
+                          </div>
+                        ) : null}
+                        <p className="rb-hint">前提：个人云已部署 Android Bridge 表，并在目标 Supabase 项目部署 bridge-pair Edge Function；设备 JWT secret 必须按 Companion 文档配置。</p>
+                      </div>
+
+                      <div className="rb-card" style={{ marginBottom: 12 }}>
+                        <div className="rb-feed-head">
+                          <b>已配对设备</b>
+                          <button type="button" className="rb-link" disabled={androidDevicesBusy || !personalPushActive} onClick={() => void refreshAndroidDevices(false)}>
+                            {androidDevicesBusy ? "刷新中…" : "刷新"}
+                          </button>
+                        </div>
+                        {androidDevices.length === 0 ? (
+                          <p className="rb-help">还没有设备。先生成配对码，在 Android Companion 中完成绑定。</p>
+                        ) : (
+                          <div style={{ display: "grid", gap: 8 }}>
+                            {androidDevices.map(device => (
+                              <button
+                                key={device.deviceId}
+                                type="button"
+                                aria-pressed={androidSelectedDeviceId === device.deviceId}
+                                onClick={() => setAndroidSelectedDeviceId(device.deviceId)}
+                                style={{ textAlign: "left", padding: 10, borderRadius: 12, border: androidSelectedDeviceId === device.deviceId ? "1px solid var(--rb-accent, #6f70ff)" : "1px solid rgba(127,127,127,.2)", background: "transparent", color: "inherit" }}
+                              >
+                                <b>{device.deviceName}</b>
+                                <span className="rb-hint" style={{ display: "block", marginTop: 4 }}>
+                                  <i style={{ color: device.online ? "#25a56a" : "#999" }}>{device.online ? "在线" : "离线"}</i>
+                                  {device.androidVersion ? " · Android " + device.androidVersion : ""}
+                                  {device.network ? " · " + device.network : ""}
+                                  {device.batteryPercent !== null ? " · 电量 " + device.batteryPercent + "%" : ""}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="rb-card" style={{ marginBottom: 12 }}>
+                        <b>下发安全动作</b>
+                        <label>目标设备
+                          <select value={androidSelectedDeviceId} onChange={event => setAndroidSelectedDeviceId(event.target.value)} disabled={androidDevices.length === 0}>
+                            <option value="">请选择设备</option>
+                            {androidDevices.map(device => <option key={device.deviceId} value={device.deviceId}>{device.deviceName}{device.online ? " · 在线" : " · 离线"}</option>)}
+                          </select>
+                        </label>
+                        <label>动作
+                          <select value={androidAction} onChange={event => setAndroidAction(event.target.value as AndroidBridgeAction)}>
+                            {ANDROID_BRIDGE_ACTIONS.map(action => <option key={action} value={action}>{action}</option>)}
+                          </select>
+                        </label>
+                        <label>动作参数（JSON）
+                          <textarea rows={5} value={androidPayloadText} onChange={event => setAndroidPayloadText(event.target.value)} />
+                        </label>
+                        <p className="rb-hint">示例：show_notification 使用 {"{\"title\":\"Float\",\"body\":\"Android Bridge 已连接\"}"}。所有参数仍会在 Android 端再次校验。</p>
+                        <button type="button" className="rb-btn" disabled={androidCommandBusy || !androidSelectedDeviceId || !personalPushActive} onClick={() => void dispatchAndroidCommand()}>
+                          {androidCommandBusy ? "等待 Android 结果…" : "下发并等待结果"}
+                        </button>
+                        {androidPendingCommand ? <p className="rb-hint">命令 {androidPendingCommand.id} 已写入 device_commands，等待真实设备回传。</p> : null}
+                        {androidLastResult ? (
+                          <div className="rb-help" style={{ marginTop: 10 }}>
+                            <b>本次结果：{androidLastResult.status}</b>
+                            {androidLastResult.errorMessage ? <p>{androidLastResult.errorMessage}</p> : null}
+                            <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{JSON.stringify(androidLastResult.result, null, 2)}</pre>
+                          </div>
+                        ) : null}
+                      </div>
+
+                      {androidRecentResults.length > 0 ? (
+                        <div className="rb-card">
+                          <b>最近 Android 结果</b>
+                          {androidRecentResults.slice(0, 8).map(result => (
+                            <div key={result.commandId} className="rb-feed-item" style={{ paddingLeft: 0, paddingRight: 0 }}>
+                              <div className="rb-feed-head"><span className="rb-type">{result.status}</span><span className="rb-time">{fmtTime(result.completedAt)}</span></div>
+                              <p className="rb-meta">{result.commandId}{result.errorMessage ? " · " + result.errorMessage : ""}</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
                   ) : null}
               </>
             </section>

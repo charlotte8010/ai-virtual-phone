@@ -235,7 +235,8 @@ async function handleAssertDedicatedProject(token: string, projectRef: string): 
             and c.relname <> all (array[
               'push_server_config', 'push_subscriptions', 'push_jobs', 'push_outbox',
               'push_shortcut_commands', 'push_bridge_config', 'push_bridge_snapshots',
-              'push_screen_sessions', 'push_screen_threads'
+              'push_screen_sessions', 'push_screen_threads',
+              'bridge_pairing_tokens', 'device_registry', 'device_commands', 'device_results'
             ])
         ) then 'personal-cloud-safe-v2'
         else 'shared-project-blocked'

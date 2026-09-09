@@ -31,12 +31,49 @@ type PushConfigRow = {
   site_origin: string | null;
 };
 type EncryptedPayload = { v: 1; iv: string; tag: string; ct: string };
+type AndroidDeviceRow = {
+  device_id: string;
+  device_name: string;
+  capabilities: unknown;
+  online: boolean;
+  battery_percent: number | null;
+  network: string | null;
+  android_version: string | null;
+  last_seen: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+type AndroidCommandRow = {
+  id: string;
+  device_id: string;
+  action: string;
+  payload: Record<string, unknown> | null;
+  require_confirm: boolean;
+  ttl_seconds: number;
+  created_at: string;
+};
+type AndroidResultRow = {
+  command_id: string;
+  device_id: string;
+  status: string;
+  result: Record<string, unknown> | null;
+  error_code: string | null;
+  error_message: string | null;
+  completed_at: string;
+};
 
 const OWNER_ID = "owner";
 const MAX_PAYLOAD_BYTES = 900_000;
 const ALLOWED_JOB_KINDS = new Set(["followup", "reply_bailout", "timed_task", "shortcut_resume"]);
 const SHORTCUT_RESULT_MODES = new Set(["none", "text", "image"]);
 const SHORTCUT_MAX_ARGS_BYTES = 16_000;
+const ANDROID_ACTIONS = new Set([
+  "open_app", "open_url", "open_map", "dial_phone", "share_text", "show_notification",
+]);
+const ANDROID_DEVICE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const ANDROID_PAIRING_TOKEN_BYTES = 32;
+const ANDROID_PAIRING_TTL_MS = 10 * 60 * 1000;
+const ANDROID_MAX_PAYLOAD_BYTES = 12_000;
 const SHORTCUT_COMMAND_ID_PATTERN = /^cmd_[a-z0-9-]{20,80}$/i;
 const SHORTCUT_TICKET_PATTERN = /^[a-f0-9]{32}$/i;
 const SHORTCUT_COMMAND_SELECT = [
@@ -259,6 +296,90 @@ Deno.serve(async (request: Request) => {
       throw new Error(message);
     }
     return value as T;
+  };
+
+  const hashHex = async (value: string): Promise<string> => {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", utf8(value)));
+    return Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
+  };
+
+  const isServiceKey = (value: string): boolean => {
+    if (value.startsWith("sb_secret_")) return true;
+    const parts = value.split(".");
+    if (parts.length !== 3) return false;
+    try {
+      const claims = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[1]))) as { role?: unknown };
+      return claims.role === "service_role";
+    } catch {
+      return false;
+    }
+  };
+
+  const toPublicAndroidDevice = (row: AndroidDeviceRow) => {
+    const lastSeenMs = row.last_seen ? Date.parse(row.last_seen) : NaN;
+    return {
+      deviceId: row.device_id,
+      deviceName: row.device_name,
+      capabilities: Array.isArray(row.capabilities) ? row.capabilities : [],
+      // Android heartbeat writes online=true, but a killed app must become offline
+      // without waiting for another write or a cron job.
+      online: row.online === true && Number.isFinite(lastSeenMs) && Date.now() - lastSeenMs <= 90_000,
+      batteryPercent: row.battery_percent ?? null,
+      network: row.network || "",
+      androidVersion: row.android_version || "",
+      lastSeen: row.last_seen || null,
+      createdAt: row.created_at || null,
+      updatedAt: row.updated_at || null,
+    };
+  };
+
+  const toPublicAndroidCommand = (row: AndroidCommandRow) => ({
+    id: row.id,
+    deviceId: row.device_id,
+    action: row.action,
+    payload: row.payload && typeof row.payload === "object" ? row.payload : {},
+    requireConfirm: row.require_confirm === true,
+    ttlSeconds: row.ttl_seconds,
+    createdAt: row.created_at,
+  });
+
+  const toPublicAndroidResult = (row: AndroidResultRow) => ({
+    commandId: row.command_id,
+    deviceId: row.device_id,
+    status: row.status,
+    result: row.result && typeof row.result === "object" ? row.result : {},
+    errorCode: row.error_code || null,
+    errorMessage: row.error_message || null,
+    completedAt: row.completed_at,
+  });
+
+  const androidPayload = (value: unknown): Record<string, string> | null => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const output: Record<string, string> = {};
+    for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) || typeof raw !== "string") return null;
+      const item = raw.trim();
+      if (!item || item.length > 4_000) return null;
+      output[key] = item;
+    }
+    return output;
+  };
+
+  const validateAndroidPayload = (actionName: string, payload: Record<string, string>): boolean => {
+    const required: Record<string, string[]> = {
+      open_app: ["package"],
+      open_url: ["url"],
+      open_map: ["destination"],
+      dial_phone: ["phone"],
+      share_text: ["text"],
+      show_notification: ["title", "body"],
+    };
+    const fields = required[actionName];
+    if (!fields || fields.some(field => !payload[field])) return false;
+    if (actionName === "open_url" && !/^https:\/\//i.test(payload.url)) return false;
+    if (actionName === "open_app" && !/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(payload.package)) return false;
+    if (actionName === "dial_phone" && !/^[0-9+*#() .-]{3,32}$/.test(payload.phone)) return false;
+    return true;
   };
 
   const url = new URL(request.url);
@@ -552,6 +673,118 @@ Deno.serve(async (request: Request) => {
   };
 
   try {
+    if (action === "android-pairing" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const anonKey = cleanText(body.anonKey, 4096);
+      // The pairing payload is copied into a third-party Android app. Never fall
+      // back to the personal cloud service key, even if the caller omits anonKey.
+      if (!anonKey || anonKey === serviceKey || isServiceKey(anonKey)) {
+        return json({ ok: false, error: "请提供当前个人云项目的 anon/publishable key，不能使用 service_role key。" }, 400);
+      }
+      const recent = await readJson<Array<{ token_hash: string }>>(await rest(
+        `bridge_pairing_tokens?owner_id=eq.${encodeURIComponent(OWNER_ID)}&created_at=gte.${encodeURIComponent(new Date(Date.now() - 60_000).toISOString())}&select=token_hash&limit=4`,
+      ));
+      if (recent.length >= 4) return json({ ok: false, error: "配对码生成过于频繁，请稍后再试。" }, 429);
+      const pairingToken = randomHex(ANDROID_PAIRING_TOKEN_BYTES);
+      const expiresAt = new Date(Date.now() + ANDROID_PAIRING_TTL_MS).toISOString();
+      await readJson(await rest("bridge_pairing_tokens", {
+        method: "POST",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify([{
+          token_hash: await hashHex(pairingToken),
+          owner_id: OWNER_ID,
+          expires_at: expiresAt,
+        }]),
+      }));
+      return json({
+        ok: true,
+        pairing: {
+          version: 1,
+          supabaseUrl,
+          anonKey,
+          pairingToken,
+          expiresAt: Date.parse(expiresAt),
+        },
+      });
+    }
+
+    if (action === "android-devices" && request.method === "GET") {
+      const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit")) || 20));
+      const rows = await readJson<AndroidDeviceRow[]>(await rest(
+        `device_registry?owner_id=eq.${encodeURIComponent(OWNER_ID)}`
+        + "&select=device_id,device_name,capabilities,online,battery_percent,network,android_version,last_seen,created_at,updated_at"
+        + `&order=last_seen.desc.nullslast&limit=${limit}`,
+      ));
+      return json({ ok: true, devices: rows.map(toPublicAndroidDevice) });
+    }
+
+    if (action === "android-command" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const deviceId = cleanText(body.deviceId, 128);
+      const actionName = cleanText(body.action, 40);
+      const payload = androidPayload(body.payload);
+      const requireConfirm = body.requireConfirm === true;
+      const ttlSeconds = Math.max(1, Math.min(3_600, Number(body.ttlSeconds) || 60));
+      if (!ANDROID_DEVICE_ID_PATTERN.test(deviceId) || !ANDROID_ACTIONS.has(actionName) || !payload) {
+        return json({ ok: false, error: "Android 命令参数不完整。" }, 400);
+      }
+      if (!validateAndroidPayload(actionName, payload) || JSON.stringify(payload).length > ANDROID_MAX_PAYLOAD_BYTES) {
+        return json({ ok: false, error: "Android 动作参数无效。" }, 400);
+      }
+      const device = await readJson<Array<{ device_id: string }>>(await rest(
+        `device_registry?device_id=eq.${encodeURIComponent(deviceId)}&owner_id=eq.${encodeURIComponent(OWNER_ID)}&select=device_id&limit=1`,
+      ));
+      if (!device[0]) return json({ ok: false, error: "Android 设备不存在或未配对。" }, 404);
+      const recent = await readJson<Array<{ id: string }>>(await rest(
+        `device_commands?device_id=eq.${encodeURIComponent(deviceId)}&created_at=gte.${encodeURIComponent(new Date(Date.now() - 60_000).toISOString())}&select=id&limit=21`,
+      ));
+      if (recent.length >= 20) return json({ ok: false, error: "Android 命令触发过于频繁，请稍后再试。" }, 429);
+      const id = `android_cmd_${randomHex(16)}`;
+      const inserted = await readJson<AndroidCommandRow[]>(await rest("device_commands", {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify([{
+          id,
+          device_id: deviceId,
+          action: actionName,
+          payload,
+          require_confirm: requireConfirm,
+          ttl_seconds: ttlSeconds,
+        }]),
+      }));
+      if (!inserted[0]) return json({ ok: false, error: "Android 命令创建失败。" }, 500);
+      return json({ ok: true, command: toPublicAndroidCommand(inserted[0]) });
+    }
+
+    if (action === "android-results" && request.method === "GET") {
+      const commandId = cleanText(url.searchParams.get("commandId"), 128);
+      const deviceId = cleanText(url.searchParams.get("deviceId"), 128);
+      if (commandId) {
+        const commands = await readJson<Array<{ id: string; device_id: string }>>(await rest(
+          `device_commands?id=eq.${encodeURIComponent(commandId)}&select=id,device_id&limit=1`,
+        ));
+        const command = commands[0];
+        if (!command) return json({ ok: false, error: "Android 命令不存在。" }, 404);
+        const results = await readJson<AndroidResultRow[]>(await rest(
+          `device_results?command_id=eq.${encodeURIComponent(commandId)}&device_id=eq.${encodeURIComponent(command.device_id)}`
+          + "&select=command_id,device_id,status,result,error_code,error_message,completed_at&limit=1",
+        ));
+        return json({ ok: true, result: results[0] ? toPublicAndroidResult(results[0]) : null });
+      }
+      if (!ANDROID_DEVICE_ID_PATTERN.test(deviceId)) return json({ ok: false, error: "缺少 Android 设备或命令 ID。" }, 400);
+      const device = await readJson<Array<{ device_id: string }>>(await rest(
+        `device_registry?device_id=eq.${encodeURIComponent(deviceId)}&owner_id=eq.${encodeURIComponent(OWNER_ID)}&select=device_id&limit=1`,
+      ));
+      if (!device[0]) return json({ ok: false, error: "Android 设备不存在或未配对。" }, 404);
+      const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit")) || 20));
+      const results = await readJson<AndroidResultRow[]>(await rest(
+        `device_results?device_id=eq.${encodeURIComponent(deviceId)}`
+        + "&select=command_id,device_id,status,result,error_code,error_message,completed_at"
+        + `&order=completed_at.desc&limit=${limit}`,
+      ));
+      return json({ ok: true, results: results.map(toPublicAndroidResult) });
+    }
+
     if (action === "health") {
       const response = await rest("push_server_config?select=id&limit=1");
       if (!response.ok) throw new Error("离线推送数据库尚未初始化。");
@@ -559,12 +792,16 @@ Deno.serve(async (request: Request) => {
         "ai_phone_cloud_meta?id=eq.personal-cloud&select=schema_version&limit=1",
       ));
       const schemaVersion = Number(meta[0]?.schema_version) || 1;
+      const androidProbe = await rest("device_registry?select=device_id&limit=1").catch(() => null);
       return json({
         ok: true,
         service: "ai-phone-personal-push",
         version: 2,
         schemaVersion,
-        capabilities: schemaVersion >= 3 ? ["screen-chat-continuous"] : [],
+        capabilities: [
+          ...(schemaVersion >= 3 ? ["screen-chat-continuous"] : []),
+          ...(androidProbe?.ok ? ["android-reality-bridge"] : []),
+        ],
       });
     }
 

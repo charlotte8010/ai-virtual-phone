@@ -18,7 +18,8 @@ begin
         'ai_phone_cloud_meta',
         'push_server_config', 'push_subscriptions', 'push_jobs', 'push_outbox',
         'push_shortcut_commands', 'push_bridge_config', 'push_bridge_snapshots',
-        'push_screen_sessions', 'push_screen_threads'
+        'push_screen_sessions', 'push_screen_threads',
+        'bridge_pairing_tokens', 'device_registry', 'device_commands', 'device_results'
       ])
   ) into has_unknown_public_table;
 
@@ -179,6 +180,134 @@ create table if not exists public.push_screen_threads (
   primary key (user_id, character_id),
   constraint push_screen_threads_pending_array check (jsonb_typeof(pending_turns) = 'array')
 );
+
+-- Android Reality Bridge v0.1：设备配对、六个显式安全动作与结果审计。
+-- 个人云是单用户项目，因此 owner_id 使用固定 text owner；这与 Android
+-- companion 的 device JWT claim 对齐，也避免在个人云里伪造 auth.users 账号。
+create table if not exists public.bridge_pairing_tokens (
+  token_hash text primary key check (token_hash ~ '^[0-9a-f]{64}$'),
+  owner_id text not null default 'owner',
+  expires_at timestamptz not null,
+  used_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.device_registry (
+  device_id text primary key,
+  owner_id text not null default 'owner',
+  device_name text not null,
+  public_key text not null,
+  capabilities jsonb not null default '[]'::jsonb,
+  online boolean not null default false,
+  battery_percent smallint,
+  network text,
+  android_version text,
+  last_seen timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.device_commands (
+  id text primary key,
+  device_id text not null references public.device_registry(device_id) on delete cascade,
+  action text not null check (action in (
+    'open_app', 'open_url', 'open_map', 'dial_phone', 'share_text', 'show_notification'
+  )),
+  payload jsonb not null default '{}'::jsonb,
+  require_confirm boolean not null default false,
+  ttl_seconds integer not null default 60 check (ttl_seconds between 1 and 3600),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.device_results (
+  command_id text primary key references public.device_commands(id) on delete cascade,
+  device_id text not null references public.device_registry(device_id) on delete cascade,
+  status text not null check (status in ('success', 'failed', 'rejected')),
+  result jsonb not null default '{}'::jsonb,
+  error_code text,
+  error_message text,
+  completed_at timestamptz not null default now()
+);
+
+-- Android companion 仓库的早期 migration 使用 auth.users UUID。个人云没有配套
+-- auth 账号时，把旧列安全迁成单用户 text；新项目不会命中这段分支。
+do $$
+begin
+  if to_regclass('public.bridge_pairing_tokens') is not null then
+    alter table public.bridge_pairing_tokens drop constraint if exists bridge_pairing_tokens_owner_id_fkey;
+    alter table public.bridge_pairing_tokens alter column owner_id type text using owner_id::text;
+  end if;
+  if to_regclass('public.device_registry') is not null then
+    alter table public.device_registry drop constraint if exists device_registry_owner_id_fkey;
+    alter table public.device_registry alter column owner_id type text using owner_id::text;
+  end if;
+end $$;
+
+alter table public.bridge_pairing_tokens enable row level security;
+alter table public.device_registry enable row level security;
+alter table public.device_commands enable row level security;
+alter table public.device_results enable row level security;
+
+revoke all on table public.bridge_pairing_tokens from public, anon, authenticated;
+
+drop policy if exists "owner can manage registered devices" on public.device_registry;
+drop policy if exists "paired device can update its heartbeat" on public.device_registry;
+drop policy if exists "owner can manage device commands" on public.device_commands;
+drop policy if exists "paired device can read its commands" on public.device_commands;
+drop policy if exists "paired device can insert its results" on public.device_results;
+drop policy if exists "owner can read device results" on public.device_results;
+
+create policy "owner can manage registered devices"
+  on public.device_registry for all to authenticated
+  using ((auth.jwt() ->> 'device_id') is null and owner_id = coalesce(auth.jwt() ->> 'app_owner_id', auth.jwt() ->> 'sub'))
+  with check ((auth.jwt() ->> 'device_id') is null and owner_id = coalesce(auth.jwt() ->> 'app_owner_id', auth.jwt() ->> 'sub'));
+
+create policy "paired device can update its heartbeat"
+  on public.device_registry for update to authenticated
+  using ((auth.jwt() ->> 'device_id') = device_id)
+  with check ((auth.jwt() ->> 'device_id') = device_id);
+
+create policy "owner can manage device commands"
+  on public.device_commands for all to authenticated
+  using ((auth.jwt() ->> 'device_id') is null and exists (
+    select 1 from public.device_registry d
+    where d.device_id = device_commands.device_id
+      and d.owner_id = coalesce(auth.jwt() ->> 'app_owner_id', auth.jwt() ->> 'sub')
+  ))
+  with check ((auth.jwt() ->> 'device_id') is null and exists (
+    select 1 from public.device_registry d
+    where d.device_id = device_commands.device_id
+      and d.owner_id = coalesce(auth.jwt() ->> 'app_owner_id', auth.jwt() ->> 'sub')
+  ));
+
+create policy "paired device can read its commands"
+  on public.device_commands for select to authenticated
+  using ((auth.jwt() ->> 'device_id') = device_id);
+
+create policy "paired device can insert its results"
+  on public.device_results for insert to authenticated
+  with check ((auth.jwt() ->> 'device_id') = device_id);
+
+create policy "owner can read device results"
+  on public.device_results for select to authenticated
+  using ((auth.jwt() ->> 'device_id') is null and exists (
+    select 1 from public.device_registry d
+    where d.device_id = device_results.device_id
+      and d.owner_id = coalesce(auth.jwt() ->> 'app_owner_id', auth.jwt() ->> 'sub')
+  ));
+
+grant select, update on table public.device_registry to authenticated;
+grant select on table public.device_commands to authenticated;
+grant insert on table public.device_results to authenticated;
+grant select, insert, update, delete on table
+  public.bridge_pairing_tokens, public.device_registry, public.device_commands, public.device_results
+to service_role;
+
+do $$
+begin
+  alter publication supabase_realtime add table public.device_commands;
+exception when duplicate_object then null;
+end $$;
 
 -- 原子取得每个角色的生成锁并扣减日额度。不同悬浮球请求不会同时覆盖上下文。
 create or replace function public.ai_phone_screen_chat_begin(
