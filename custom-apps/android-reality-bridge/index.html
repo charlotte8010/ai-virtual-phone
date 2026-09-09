@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Android Reality Bridge</title>
+<style>
+  :root {
+    --ink: #15202b;
+    --muted: #687580;
+    --paper: #f4f0e7;
+    --panel: rgba(255, 253, 247, .88);
+    --line: rgba(21, 32, 43, .13);
+    --blue: #2c6e91;
+    --blue-deep: #19435b;
+    --copper: #c36d45;
+    --mint: #2d806b;
+    --danger: #b4463d;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { min-height: 100%; margin: 0; }
+  body {
+    color: var(--ink);
+    background:
+      radial-gradient(circle at 84% 0%, rgba(195, 109, 69, .18), transparent 33%),
+      linear-gradient(145deg, #e8eef0 0%, var(--paper) 48%, #e8e0d4 100%);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  button, input, textarea, select { font: inherit; }
+  button { cursor: pointer; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+    outline: 3px solid rgba(44, 110, 145, .28);
+    outline-offset: 2px;
+  }
+  .app { width: min(100%, 680px); margin: 0 auto; padding: 18px 15px calc(28px + env(safe-area-inset-bottom)); }
+  .topline { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+  .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .brand-mark { position: relative; width: 34px; height: 34px; flex: 0 0 34px; border: 2px solid var(--blue-deep); border-radius: 10px; background: #f9f6ed; box-shadow: 4px 4px 0 rgba(25, 67, 91, .12); }
+  .brand-mark::before { content: ""; position: absolute; left: 8px; right: 8px; top: 9px; height: 7px; border: 2px solid var(--copper); border-radius: 5px; }
+  .brand-mark::after { content: ""; position: absolute; left: 13px; right: 13px; bottom: 7px; height: 3px; border-radius: 3px; background: var(--blue); }
+  .eyebrow { color: var(--blue); font: 700 10px/1.2 var(--mono); letter-spacing: .16em; text-transform: uppercase; }
+  h1 { margin: 3px 0 0; font-size: clamp(25px, 7vw, 36px); line-height: 1.05; letter-spacing: -.055em; }
+  .transport-pill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; color: var(--blue-deep); background: rgba(255,255,255,.58); white-space: nowrap; font-size: 12px; font-weight: 700; }
+  .transport-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 3px rgba(104, 117, 128, .13); }
+  .transport-pill.local::before { background: var(--mint); box-shadow: 0 0 0 3px rgba(45, 128, 107, .16); }
+  .transport-pill.remote::before { background: var(--copper); box-shadow: 0 0 0 3px rgba(195, 109, 69, .16); }
+  .hero { position: relative; overflow: hidden; display: grid; grid-template-columns: 1fr 132px; gap: 14px; align-items: stretch; margin-bottom: 14px; padding: 18px; border: 1px solid rgba(25, 67, 91, .16); border-radius: 22px; background: linear-gradient(135deg, rgba(255,255,255,.77), rgba(225, 237, 239, .76)); box-shadow: 0 14px 38px rgba(42, 57, 65, .09); }
+  .hero::after { content: ""; position: absolute; right: -30px; bottom: -62px; width: 170px; height: 170px; border: 1px solid rgba(44,110,145,.18); border-radius: 50%; box-shadow: 0 0 0 16px rgba(44,110,145,.05), 0 0 0 32px rgba(44,110,145,.04); pointer-events: none; }
+  .hero-kicker { margin: 0 0 8px; color: var(--copper); font: 700 11px/1.2 var(--mono); letter-spacing: .08em; }
+  .hero p { margin: 0; max-width: 380px; color: var(--muted); }
+  .signal-rail { position: relative; z-index: 1; align-self: center; min-height: 92px; padding: 15px 11px 11px; border-left: 1px solid rgba(44,110,145,.22); background: repeating-linear-gradient(90deg, transparent 0 16px, rgba(44,110,145,.08) 16px 17px); }
+  .signal-rail span { display: block; color: var(--blue); font: 700 9px/1.2 var(--mono); letter-spacing: .08em; }
+  .signal-line { position: relative; height: 43px; margin-top: 10px; }
+  .signal-line::before { content: ""; position: absolute; left: 0; right: 0; top: 22px; height: 1px; background: rgba(44,110,145,.35); }
+  .signal-line::after { content: ""; position: absolute; left: 6px; top: 11px; width: 8px; height: 22px; border-top: 2px solid var(--copper); border-bottom: 2px solid var(--copper); box-shadow: 19px 8px 0 -1px var(--blue), 39px -6px 0 -1px var(--copper), 62px 3px 0 -1px var(--mint), 84px -8px 0 -1px var(--blue); transform: skewX(-28deg); }
+  .panel { margin-bottom: 14px; padding: 15px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); box-shadow: 0 8px 24px rgba(42, 57, 65, .06); }
+  .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  .panel h2 { margin: 0; font-size: 16px; letter-spacing: -.02em; }
+  .panel-note { color: var(--muted); font-size: 11px; }
+  .state-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
+  .state-cell { min-width: 0; padding: 10px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .state-cell.wide { grid-column: 1 / -1; }
+  .state-label { display: block; margin-bottom: 3px; color: var(--muted); font-size: 11px; }
+  .state-value { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+  .mono { font-family: var(--mono); font-size: 11px; }
+  .ok { color: var(--mint); } .warn { color: var(--copper); } .bad { color: var(--danger); }
+  .device-row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  select, input, textarea { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; color: var(--ink); background: rgba(255,255,255,.72); }
+  select { min-width: 0; }
+  .btn { border: 1px solid transparent; border-radius: 10px; padding: 9px 13px; color: #fff; background: var(--blue-deep); font-weight: 700; white-space: nowrap; }
+  .btn:hover { filter: brightness(1.06); } .btn:disabled { cursor: not-allowed; opacity: .45; filter: none; }
+  .btn.secondary { color: var(--blue-deep); border-color: rgba(25,67,91,.22); background: transparent; }
+  .btn.copper { background: var(--copper); }
+  .permission-list, .capability-list { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; color: var(--muted); background: rgba(255,255,255,.55); font-size: 11px; }
+  .chip::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .chip.granted { color: var(--mint); } .chip.denied { color: var(--danger); } .chip.unavailable { color: var(--muted); }
+  .action-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin-bottom: 13px; }
+  .action-tab { min-height: 48px; border: 1px solid var(--line); border-radius: 11px; padding: 7px 5px; color: var(--blue-deep); background: rgba(255,255,255,.43); font-size: 12px; font-weight: 700; }
+  .action-tab.active { border-color: var(--blue); color: #fff; background: var(--blue); box-shadow: 3px 3px 0 rgba(25,67,91,.15); }
+  .action-copy { margin: 0 0 11px; color: var(--muted); font-size: 12px; }
+  .field-grid { display: grid; gap: 9px; }
+  .field label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 11px; font-weight: 700; }
+  .field textarea { min-height: 68px; resize: vertical; }
+  .execute-row { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-top: 12px; }
+  .ttl { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
+  .ttl input { width: 65px; padding: 8px; font-family: var(--mono); }
+  .confirm { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
+  .confirm input { width: auto; }
+  .hint-line { width: 100%; margin: 0; color: var(--muted); font-size: 11px; }
+  .notice { margin-bottom: 14px; border: 1px solid rgba(44,110,145,.2); border-radius: 11px; padding: 10px 12px; color: var(--blue-deep); background: rgba(225,237,239,.78); font-size: 12px; }
+  .notice.error { border-color: rgba(180,70,61,.25); color: var(--danger); background: rgba(255,236,230,.85); }
+  .notice.success { border-color: rgba(45,128,107,.24); color: var(--mint); background: rgba(228,244,237,.85); }
+  .code-block { overflow: auto; max-height: 230px; margin: 0; border: 1px solid rgba(21,32,43,.12); border-radius: 11px; padding: 11px; color: #dce8ed; background: #18252d; font: 11px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; }
+  .result-meta { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-bottom: 8px; }
+  .result-badge { border-radius: 999px; padding: 4px 8px; color: #fff; background: var(--muted); font: 700 10px/1 var(--mono); }
+  .result-badge.success { background: var(--mint); } .result-badge.failed, .result-badge.rejected { background: var(--danger); }
+  .result-meta span:not(.result-badge) { color: var(--muted); font-size: 11px; }
+  .subhead { display: block; margin: 12px 0 7px; color: var(--muted); font: 700 10px/1.2 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+  .log-list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+  .log-item { display: grid; grid-template-columns: 54px 1fr; gap: 8px; padding: 7px 0; border-bottom: 1px dashed var(--line); }
+  .log-time { color: var(--muted); font: 10px/1.4 var(--mono); }
+  .log-text { min-width: 0; overflow-wrap: anywhere; font-size: 11px; }
+  .empty { color: var(--muted); font-size: 12px; }
+  @media (max-width: 420px) {
+    .app { padding-left: 11px; padding-right: 11px; }
+    .hero { grid-template-columns: 1fr; }
+    .signal-rail { min-height: 65px; border-top: 1px solid rgba(44,110,145,.22); border-left: 0; }
+    .signal-line { height: 28px; margin-top: 5px; }
+    .signal-line::before { top: 15px; }
+    .signal-line::after { top: 5px; }
+    .action-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .transport-pill { padding-left: 8px; padding-right: 8px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<main class="app">
+  <header class="topline">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div><div class="eyebrow">FLOAT / REALITY BRIDGE</div><h1>设备在场</h1></div>
+    </div>
+    <span id="transportPill" class="transport-pill">未连接</span>
+  </header>
+
+  <div id="notice" class="notice" role="alert" hidden></div>
+
+  <section class="hero" aria-label="Reality Bridge 状态">
+    <div>
+      <p class="hero-kicker">CONTROLLED DEVICE SURFACE</p>
+      <p>查看宿主暴露的设备能力，发送一次明确的安全动作，并把完整 command/result 留在这里核对。</p>
+    </div>
+    <div class="signal-rail" aria-hidden="true"><span>LINK / 01</span><div class="signal-line"></div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>设备状态</h2><button id="refreshBtn" class="btn secondary" type="button">刷新状态</button></div>
+    <div class="device-row"><label class="state-label" for="deviceSelect">目标设备</label><select id="deviceSelect" aria-label="目标设备"><option value="">读取中…</option></select></div>
+    <div class="state-grid">
+      <div class="state-cell"><span class="state-label">Transport</span><strong id="transportValue" class="state-value">—</strong></div>
+      <div class="state-cell"><span class="state-label">在线状态</span><strong id="onlineValue" class="state-value">—</strong></div>
+      <div class="state-cell"><span class="state-label">设备名</span><strong id="deviceNameValue" class="state-value">—</strong></div>
+      <div class="state-cell"><span class="state-label">是否绑定</span><strong id="boundValue" class="state-value">—</strong></div>
+      <div class="state-cell wide"><span class="state-label">deviceId</span><strong id="deviceIdValue" class="state-value mono">—</strong></div>
+      <div class="state-cell"><span class="state-label">是否可执行</span><strong id="canExecuteValue" class="state-value">—</strong></div>
+      <div class="state-cell"><span class="state-label">设备 Android</span><strong id="androidValue" class="state-value">—</strong></div>
+      <div class="state-cell wide"><span class="state-label">原生权限状态</span><div id="permissionList" class="permission-list"><span class="empty">尚未读取</span></div></div>
+      <div class="state-cell wide"><span class="state-label">设备动作能力</span><div id="capabilityList" class="capability-list"><span class="empty">尚未读取</span></div></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>六个动作测试</h2><span class="panel-note">由宿主再次校验</span></div>
+    <div class="action-grid" role="tablist" aria-label="Reality 动作">
+      <button class="action-tab" data-action="open_app" type="button">打开 App</button>
+      <button class="action-tab" data-action="open_url" type="button">打开网页</button>
+      <button class="action-tab" data-action="open_map" type="button">打开地图</button>
+      <button class="action-tab" data-action="dial_phone" type="button">拨号页</button>
+      <button class="action-tab" data-action="share_text" type="button">分享文字</button>
+      <button class="action-tab" data-action="show_notification" type="button">显示通知</button>
+    </div>
+    <p id="actionCopy" class="action-copy"></p>
+    <div id="fieldGrid" class="field-grid"></div>
+    <div class="execute-row">
+      <button id="executeBtn" class="btn copper" type="button">执行这个动作</button>
+      <label class="ttl">TTL <input id="ttlInput" type="number" min="1" max="900" value="60" inputmode="numeric"> 秒</label>
+      <label class="confirm"><input id="confirmInput" type="checkbox"> 请求本机确认</label>
+      <p class="hint-line">默认不请求确认；后台 Activity 动作若受系统限制会返回明确失败结果。</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Command / Result</h2><span id="lastTransport" class="panel-note">等待调用</span></div>
+    <span class="subhead">command</span>
+    <pre id="commandPreview" class="code-block">尚未发送 command。</pre>
+    <span class="subhead">result</span>
+    <div id="resultMeta" class="result-meta"><span class="empty">尚未收到 result。</span></div>
+    <pre id="resultPreview" class="code-block">—</pre>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>调用记录</h2><span class="panel-note">仅本次打开期间</span></div>
+    <ul id="logList" class="log-list"><li class="empty">还没有调用记录。</li></ul>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var ACTIONS = {
+    open_app: { label: "打开 App", copy: "仅请求 Android 启动已安装应用；后台时由宿主按系统可见性规则拒绝。", fields: [{ key: "package", label: "包名", placeholder: "com.android.settings", value: "com.android.settings", multiline: false }] },
+    open_url: { label: "打开网页", copy: "只接受 HTTPS 地址；Android 系统负责选择可处理的浏览器。", fields: [{ key: "url", label: "HTTPS 地址", placeholder: "https://example.com", value: "https://example.com", multiline: false }] },
+    open_map: { label: "打开地图", copy: "把地点交给系统地图 Intent；这不是屏幕控制。", fields: [{ key: "destination", label: "地点", placeholder: "北京市朝阳区", value: "北京市朝阳区", multiline: false }] },
+    dial_phone: { label: "拨号页", copy: "只打开系统拨号页，不自动拨出电话。", fields: [{ key: "phone", label: "电话号码", placeholder: "10086", value: "10086", multiline: false }] },
+    share_text: { label: "分享文字", copy: "调用系统分享选择器，把一段文字交给用户选择的目标应用。", fields: [{ key: "text", label: "分享内容", placeholder: "来自 Float Android Reality Bridge", value: "来自 Float Android Reality Bridge", multiline: true }] },
+    show_notification: { label: "显示通知", copy: "由 Android 通知管理器展示；这个动作不依赖前台 Activity。", fields: [{ key: "title", label: "标题", placeholder: "Float Reality", value: "Float Reality", multiline: false }, { key: "body", label: "正文", placeholder: "本机通知测试成功", value: "本机通知测试成功", multiline: true }] }
+  };
+  var state = { action: "show_notification", capabilities: null, permission: null, selectedDeviceId: "", busy: false, logs: [] };
+  var $ = function (id) { return document.getElementById(id); };
+  var refs = {
+    notice: $("notice"), transportPill: $("transportPill"), refreshBtn: $("refreshBtn"),
+    deviceSelect: $("deviceSelect"), transportValue: $("transportValue"), onlineValue: $("onlineValue"),
+    deviceNameValue: $("deviceNameValue"), boundValue: $("boundValue"), deviceIdValue: $("deviceIdValue"),
+    canExecuteValue: $("canExecuteValue"), androidValue: $("androidValue"), permissionList: $("permissionList"),
+    capabilityList: $("capabilityList"), actionCopy: $("actionCopy"), fieldGrid: $("fieldGrid"),
+    executeBtn: $("executeBtn"), ttlInput: $("ttlInput"), confirmInput: $("confirmInput"),
+    lastTransport: $("lastTransport"), commandPreview: $("commandPreview"), resultMeta: $("resultMeta"),
+    resultPreview: $("resultPreview"), logList: $("logList")
+  };
+
+  function hasRealityApi() {
+    return !!(window.AiPhone && window.AiPhone.reality
+      && typeof window.AiPhone.reality.getCapabilities === "function"
+      && typeof window.AiPhone.reality.getPermissionState === "function"
+      && typeof window.AiPhone.reality.execute === "function");
+  }
+  function text(value, fallback) {
+    return value === null || value === undefined || String(value).trim() === "" ? (fallback || "—") : String(value);
+  }
+  function pretty(value) {
+    try { return JSON.stringify(value, null, 2); } catch (error) { return String(value); }
+  }
+  function errorText(error) { return error && error.message ? error.message : String(error || "未知错误"); }
+  function setNotice(message, tone) {
+    refs.notice.textContent = message || "";
+    refs.notice.className = "notice" + (tone ? " " + tone : "");
+    refs.notice.hidden = !message;
+  }
+  function setValue(element, value, tone) {
+    element.textContent = text(value);
+    element.classList.remove("ok", "warn", "bad");
+    if (tone) element.classList.add(tone);
+  }
+  function transportLabel(kind) { return kind === "local_native" ? "本机 Native" : kind === "remote_cloud" ? "远程 Cloud" : "未连接"; }
+  function statusLabel(status) { return status === "success" ? "成功" : status === "failed" ? "失败" : status === "rejected" ? "已拒绝" : "未知"; }
+  function selectedDevice() {
+    var caps = state.capabilities || {};
+    var devices = Array.isArray(caps.devices) ? caps.devices : [];
+    return devices.find(function (device) { return device.deviceId === state.selectedDeviceId; }) || null;
+  }
+  function currentDeviceId() {
+    var caps = state.capabilities || {};
+    return state.selectedDeviceId || caps.deviceId || "";
+  }
+  function renderDeviceOptions() {
+    var caps = state.capabilities;
+    refs.deviceSelect.replaceChildren();
+    var devices = caps && Array.isArray(caps.devices) ? caps.devices : [];
+    if (devices.length === 0 && caps && caps.deviceId) {
+      devices = [{ deviceId: caps.deviceId, deviceName: caps.deviceName || "Android device", online: caps.online, actions: caps.actions || [] }];
+    }
+    if (devices.length === 0) {
+      var empty = document.createElement("option"); empty.value = ""; empty.textContent = "暂无已绑定设备"; refs.deviceSelect.appendChild(empty); return;
+    }
+    devices.forEach(function (device) {
+      var option = document.createElement("option");
+      option.value = device.deviceId;
+      option.textContent = (device.deviceName || "Android device") + " · " + device.deviceId;
+      refs.deviceSelect.appendChild(option);
+    });
+    if (!devices.some(function (device) { return device.deviceId === state.selectedDeviceId; })) state.selectedDeviceId = devices[0].deviceId;
+    refs.deviceSelect.value = state.selectedDeviceId;
+  }
+  function renderChips(container, values, statusMap) {
+    container.replaceChildren();
+    if (!values || values.length === 0) { var empty = document.createElement("span"); empty.className = "empty"; empty.textContent = "宿主未报告"; container.appendChild(empty); return; }
+    values.forEach(function (item) {
+      var chip = document.createElement("span");
+      var value = String(item);
+      var status = statusMap && statusMap[value] ? statusMap[value] : "";
+      chip.className = "chip" + (status ? " " + status : "");
+      chip.textContent = value + (status ? " · " + status : "");
+      container.appendChild(chip);
+    });
+  }
+  function renderState() {
+    var caps = state.capabilities;
+    var permission = state.permission;
+    var device = selectedDevice();
+    renderDeviceOptions();
+    if (!caps || !permission) {
+      refs.transportPill.textContent = "未连接"; refs.transportPill.className = "transport-pill";
+      [refs.transportValue, refs.onlineValue, refs.deviceNameValue, refs.boundValue, refs.deviceIdValue, refs.canExecuteValue, refs.androidValue].forEach(function (element) { setValue(element, "—"); });
+      renderChips(refs.permissionList, []); renderChips(refs.capabilityList, []); return;
+    }
+    var transport = transportLabel(caps.transport);
+    refs.transportPill.textContent = transport;
+    refs.transportPill.className = "transport-pill " + (caps.transport === "local_native" ? "local" : "remote");
+    setValue(refs.transportValue, transport, "ok");
+    setValue(refs.onlineValue, caps.online ? "在线" : "离线", caps.online ? "ok" : "warn");
+    setValue(refs.deviceNameValue, device ? device.deviceName : caps.deviceName, "");
+    setValue(refs.boundValue, permission.bound ? "已绑定" : "未绑定", permission.bound ? "ok" : "warn");
+    setValue(refs.deviceIdValue, device ? device.deviceId : caps.deviceId, "");
+    setValue(refs.canExecuteValue, permission.canExecute ? "可执行" : "不可执行", permission.canExecute ? "ok" : "warn");
+    setValue(refs.androidValue, device && device.androidVersion ? device.androidVersion : "由宿主决定", "");
+    var nativePermissions = permission.nativePermissions || {};
+    var permissionNames = Object.keys(nativePermissions);
+    renderChips(refs.permissionList, permissionNames, nativePermissions);
+    var actions = device && Array.isArray(device.actions) ? device.actions : (Array.isArray(caps.actions) ? caps.actions : []);
+    renderChips(refs.capabilityList, actions);
+    refs.executeBtn.disabled = state.busy || !currentDeviceId();
+  }
+  function renderActionForm() {
+    var spec = ACTIONS[state.action];
+    refs.actionCopy.textContent = spec.copy;
+    refs.fieldGrid.replaceChildren();
+    spec.fields.forEach(function (field) {
+      var wrapper = document.createElement("div"); wrapper.className = "field";
+      var label = document.createElement("label"); label.textContent = field.label; wrapper.appendChild(label);
+      var input = field.multiline ? document.createElement("textarea") : document.createElement("input");
+      input.dataset.field = field.key; input.placeholder = field.placeholder; input.value = field.value; input.setAttribute("aria-label", field.label); wrapper.appendChild(input);
+      refs.fieldGrid.appendChild(wrapper);
+    });
+    document.querySelectorAll("[data-action]").forEach(function (button) { button.classList.toggle("active", button.dataset.action === state.action); });
+  }
+  function payloadFromForm() {
+    var payload = {};
+    ACTIONS[state.action].fields.forEach(function (field) {
+      var input = refs.fieldGrid.querySelector('[data-field="' + field.key + '"]');
+      var value = input ? input.value.trim() : "";
+      if (!value) throw new Error(field.label + "不能为空");
+      payload[field.key] = value;
+    });
+    return payload;
+  }
+  function addLog(label, detail) {
+    state.logs.unshift({ time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), label: label, detail: detail });
+    state.logs = state.logs.slice(0, 8);
+    refs.logList.replaceChildren();
+    state.logs.forEach(function (item) {
+      var li = document.createElement("li"); li.className = "log-item";
+      var time = document.createElement("span"); time.className = "log-time"; time.textContent = item.time;
+      var body = document.createElement("span"); body.className = "log-text"; body.textContent = item.label + (item.detail ? " · " + item.detail : "");
+      li.appendChild(time); li.appendChild(body); refs.logList.appendChild(li);
+    });
+  }
+  function setBusy(value) {
+    state.busy = value;
+    refs.refreshBtn.disabled = value;
+    refs.executeBtn.disabled = value || !currentDeviceId();
+    document.querySelectorAll("[data-action]").forEach(function (button) { button.disabled = value; });
+  }
+  function renderResult(result) {
+    refs.lastTransport.textContent = transportLabel(result.transport);
+    refs.resultMeta.replaceChildren();
+    var badge = document.createElement("span"); badge.className = "result-badge " + String(result.status || ""); badge.textContent = statusLabel(result.status); refs.resultMeta.appendChild(badge);
+    var command = document.createElement("span"); command.textContent = "command " + text(result.commandId); refs.resultMeta.appendChild(command);
+    var device = document.createElement("span"); device.textContent = "device " + text(result.deviceId); refs.resultMeta.appendChild(device);
+    refs.resultPreview.textContent = pretty(result);
+  }
+  async function refresh() {
+    if (!hasRealityApi()) throw new Error("当前宿主没有提供 window.AiPhone.reality；请在 Float 自定义应用宿主中打开。");
+    setBusy(true); setNotice("正在读取 transport、设备能力和原生权限…", "");
+    try {
+      var responses = await Promise.all([
+        window.AiPhone.reality.getCapabilities(),
+        window.AiPhone.reality.getPermissionState()
+      ]);
+      state.capabilities = responses[0]; state.permission = responses[1];
+      renderState(); addLog("状态刷新", transportLabel(state.capabilities.transport)); setNotice("状态已刷新。", "success");
+    } catch (error) {
+      state.capabilities = null; state.permission = null; renderState(); setNotice("状态读取失败：" + errorText(error), "error"); addLog("状态读取失败", errorText(error));
+    } finally { setBusy(false); renderState(); }
+  }
+  async function execute() {
+    if (!hasRealityApi()) { setNotice("当前宿主没有提供 Reality 通道。", "error"); return; }
+    try {
+      if (!state.capabilities) await refresh();
+      var deviceId = currentDeviceId();
+      if (!deviceId) throw new Error("没有可执行的目标设备；请先完成配对或连接远程设备。");
+      var ttl = Number(refs.ttlInput.value);
+      if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > 900) throw new Error("TTL 必须是 1–900 秒的整数。");
+      var command = { deviceId: deviceId, action: state.action, payload: payloadFromForm(), requireConfirm: refs.confirmInput.checked, ttlSeconds: ttl };
+      refs.commandPreview.textContent = pretty(command); refs.resultPreview.textContent = "等待 result…"; refs.resultMeta.replaceChildren();
+      var waiting = document.createElement("span"); waiting.className = "empty"; waiting.textContent = "正在等待宿主返回…"; refs.resultMeta.appendChild(waiting);
+      setBusy(true); setNotice("正在下发 " + ACTIONS[state.action].label + "…", ""); addLog("发送 " + state.action, deviceId);
+      var result = await window.AiPhone.reality.execute(command);
+      renderResult(result);
+      if (result.status === "success") { setNotice("动作执行成功，result 已回传。", "success"); addLog("收到成功 result", text(result.commandId)); }
+      else { setNotice("动作未成功：" + text(result.errorMessage, statusLabel(result.status)), "error"); addLog("收到 " + statusLabel(result.status) + " result", text(result.errorCode, "无错误码")); }
+    } catch (error) {
+      refs.resultPreview.textContent = pretty({ ok: false, error: errorText(error) });
+      refs.resultMeta.replaceChildren(); var failed = document.createElement("span"); failed.className = "result-badge failed"; failed.textContent = "调用失败"; refs.resultMeta.appendChild(failed);
+      setNotice("动作调用失败：" + errorText(error), "error"); addLog("调用失败", errorText(error));
+    } finally { setBusy(false); renderState(); }
+  }
+  refs.refreshBtn.addEventListener("click", function () { void refresh(); });
+  refs.deviceSelect.addEventListener("change", function () { state.selectedDeviceId = refs.deviceSelect.value; renderState(); });
+  document.querySelectorAll("[data-action]").forEach(function (button) { button.addEventListener("click", function () { state.action = button.dataset.action; renderActionForm(); }); });
+  refs.executeBtn.addEventListener("click", function () { void execute(); });
+  renderActionForm(); renderState();
+  if (hasRealityApi()) void refresh();
+  else setNotice("等待 Float 宿主 Reality 通道；当前页面不会直接访问设备或云端凭据。", "");
+}());
+</script>
+</body>
+</html>

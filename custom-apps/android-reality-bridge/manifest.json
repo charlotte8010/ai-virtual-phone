@@ -1,0 +1,15 @@
+{
+  "sdkVersion": "1.0",
+  "id": "float.android-reality-bridge",
+  "name": "Android Reality Bridge",
+  "version": "1.0.0",
+  "author": "Float 官方",
+  "description": "通过 Float 宿主查看已绑定 Android 设备，并测试六个安全 Reality 动作。",
+  "icon": "icon.png",
+  "entry": "index.html",
+  "permissions": [
+    "reality.capabilities.read",
+    "reality.permission.read",
+    "reality.device.action"
+  ]
+}
