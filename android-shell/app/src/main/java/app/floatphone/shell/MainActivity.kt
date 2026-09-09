@@ -30,6 +30,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 
 /**
  * Float 小手机安卓壳：原生 WebView 直接加载线上站点。
@@ -163,6 +165,7 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false)
 
         webView.addJavascriptInterface(ShellBridge(), "AndroidShell")
+        installRealityNativeChannel()
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
@@ -476,6 +479,32 @@ class MainActivity : AppCompatActivity() {
         } else {
             PushService.start(this)
         }
+    }
+
+    /**
+     * Controlled top-level-only Reality channel. WebMessageListener applies an
+     * origin allowlist before this callback; the callback also rejects child
+     * frames so custom-app iframes cannot reach native Reality directly.
+     */
+    private fun installRealityNativeChannel() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
+        val site = Uri.parse(SITE_URL)
+        val authority = site.authority ?: return
+        val scheme = site.scheme ?: return
+        val allowedOrigin = "$scheme://$authority"
+        val channel = RealityNativeChannel(this)
+        WebViewCompat.addWebMessageListener(
+            webView,
+            RealityNativeChannel.JS_OBJECT_NAME,
+            setOf(allowedOrigin),
+            WebViewCompat.WebMessageListener { _, message, sourceOrigin, isMainFrame, replyProxy ->
+                if (sourceOrigin.scheme != scheme || sourceOrigin.authority != authority) {
+                    replyProxy.postMessage(channel.handle("{}", false))
+                } else {
+                    replyProxy.postMessage(channel.handle(message.data.orEmpty(), isMainFrame))
+                }
+            },
+        )
     }
 
     override fun onDestroy() {

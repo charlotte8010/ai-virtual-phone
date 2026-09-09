@@ -58,6 +58,9 @@ export type CustomAppPermission =
   | "wallet.pay"
   | "bridge.send"
   | "bridge.read"
+  | "reality.capabilities.read"
+  | "reality.permission.read"
+  | "reality.device.action"
   | "online.play";
 
 export type CustomAppSdkVersion = "1.0" | string;

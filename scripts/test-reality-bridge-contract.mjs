@@ -21,6 +21,32 @@ assert.deepEqual(protocol.REALITY_APP_PERMISSIONS, [
 ]);
 assert.equal(protocol.REALITY_NATIVE_CHANNEL_NAME, "FloatRealityChannel");
 assert.equal(protocol.REALITY_PROTOCOL_VERSION, 1);
+assert.match(protocol.createRealityBindingNonce(), /^[A-Za-z0-9_-]{32,256}$/);
+
+const bindingRequest = protocol.createRealityNativeRequest({
+  requestId: "native-binding-1",
+  operation: "prepareBinding",
+  bindingNonce: "n".repeat(32),
+});
+assert.deepEqual(bindingRequest, {
+  protocolVersion: 1,
+  channel: "float.reality",
+  requestId: "native-binding-1",
+  operation: "prepareBinding",
+  bindingNonce: "n".repeat(32),
+});
+assert.equal(
+  protocol.normalizeRealityBindingMaterial({ deviceId: "shell-device-1", nonce: "n".repeat(32), publicKey: null }).deviceId,
+  "shell-device-1",
+);
+assert.throws(
+  () => protocol.createRealityNativeRequest({ requestId: "native-binding-2", operation: "prepareBinding", bindingNonce: "short" }),
+  /nonce/,
+);
+assert.throws(
+  () => protocol.createRealityNativeRequest({ requestId: "native-binding-3", operation: "getCapabilities", bindingNonce: "n".repeat(32) }),
+  /only valid/,
+);
 
 const command = protocol.createRealityCommand({
   commandId: "reality-command-1",

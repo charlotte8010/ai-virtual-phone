@@ -272,6 +272,9 @@ function normalizePermission(value: unknown): CustomAppPermission | null {
     "ui.call",
     "wallet.read",
     "wallet.pay",
+    "reality.capabilities.read",
+    "reality.permission.read",
+    "reality.device.action",
     "online.play",
   ]);
   return allowed.has(text as CustomAppPermission) ? text as CustomAppPermission : null;

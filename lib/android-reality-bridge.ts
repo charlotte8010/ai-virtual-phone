@@ -73,6 +73,7 @@ export async function loadAndroidDevices(limit = 20): Promise<AndroidDevice[]> {
 }
 
 export async function sendAndroidCommand(input: {
+  commandId?: string;
   deviceId: string;
   action: AndroidBridgeAction;
   payload: Record<string, unknown>;
@@ -84,6 +85,7 @@ export async function sendAndroidCommand(input: {
   const response = await personalPushFetch("android-command", {
     method: "POST",
     body: JSON.stringify({
+      commandId: input.commandId,
       deviceId: input.deviceId,
       action: input.action,
       payload,

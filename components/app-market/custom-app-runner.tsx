@@ -87,6 +87,16 @@ import {
 import { REALITY_BRIDGE_APP_EVENT_NAME, REALITY_BRIDGE_DATA_EVENT } from "@/lib/reality-bridge/types";
 import { OnlineRoomConnection, onlineCloudApi } from "@/lib/online-room-client";
 import { submitContentReport } from "@/lib/moderation-client";
+import {
+  loadAndroidDevices,
+  sendAndroidCommand,
+  waitForAndroidResult,
+} from "@/lib/android-reality-bridge";
+import {
+  createRealityCommand,
+} from "@/lib/android-reality-bridge-protocol";
+import { BrowserNativeRealityChannel, getBrowserRealityChannel } from "@/lib/reality-bridge/native-channel";
+import { LocalNativeTransport, RemoteCloudTransport, type RealityTransport } from "@/lib/reality-bridge/transport";
 
 type CustomAppRunnerProps = {
   app: InstalledCustomApp;
@@ -115,6 +125,12 @@ const CUSTOM_APP_BACKGROUND_RUNNER_TIMEOUT_MS = 5 * 60_000;
 
 function normalizeAssetRef(value: string): string {
   return value.replace(/\\/g, "/").replace(/^\.?\//, "").replace(/^\/+/, "");
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
 }
 
 function rewriteAssetRefs(html: string, app: InstalledCustomApp): string {
@@ -535,6 +551,11 @@ html, body {
       send: function(payload){ return request('bridge.send', payload || {}); },
       readState: function(payload){ return request('bridge.readState', payload || {}); }
     },
+    reality: {
+      getCapabilities: function(payload){ return request('reality.getCapabilities', payload || {}); },
+      getPermissionState: function(payload){ return request('reality.getPermissionState', payload || {}); },
+      execute: function(payload){ return request('reality.execute', payload || {}); }
+    },
     room: {
       create: function(payload){ return request('room.create', payload || {}); },
       join: function(payload){ return request('room.join', payload || {}); },
@@ -870,11 +891,18 @@ export function CustomAppRunner({
   const frameAudioChannelsRef = useRef<Map<string, FrameAudioChannel>>(new Map());
   const frameObjectUrlsRef = useRef<Set<string>>(new Set());
   const onlineRoomRef = useRef<OnlineRoomConnection | null>(null);
+  const realityTransportRef = useRef<RealityTransport | null>(null);
 
   // 联机房间随 APP 生命周期走：关 APP 即退房（房主退房 = 关房）
   useEffect(() => () => {
     onlineRoomRef.current?.leave();
     onlineRoomRef.current = null;
+  }, []);
+
+  useEffect(() => () => {
+    const transport = realityTransportRef.current;
+    if (transport instanceof LocalNativeTransport) transport.dispose();
+    realityTransportRef.current = null;
   }, []);
   const [frameId] = useState(() => `custom_app_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
   const [bridgeReady, setBridgeReady] = useState(false);
@@ -1100,6 +1128,24 @@ export function CustomAppRunner({
     throw new Error(`应用未声明权限：${permissions.join(" 或 ")}`);
   }, [app]);
 
+  const getRealityTransport = useCallback((record: Record<string, unknown>): RealityTransport => {
+    const nativeEndpoint = getBrowserRealityChannel();
+    if (nativeEndpoint) {
+      const existing = realityTransportRef.current;
+      if (existing instanceof LocalNativeTransport) return existing;
+      const transport = new LocalNativeTransport(new BrowserNativeRealityChannel(nativeEndpoint));
+      realityTransportRef.current = transport;
+      return transport;
+    }
+
+    const selectedDeviceId = String(record.deviceId ?? record.device_id ?? "").trim() || undefined;
+    return new RemoteCloudTransport({
+      loadDevices: loadAndroidDevices,
+      sendCommand: sendAndroidCommand,
+      waitForResult: waitForAndroidResult,
+    }, selectedDeviceId);
+  }, []);
+
   const handleBridgeRequest = useCallback(async (action: string, payload: unknown): Promise<BridgeResult> => {
     const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
     const launchRecord = launchContext && typeof launchContext === "object" ? launchContext : {};
@@ -1142,6 +1188,7 @@ export function CustomAppRunner({
           tasks: ["schedule", "list", "cancel"],
           wallet: ["get", "pay"],
           bridge: ["send", "readState"],
+          reality: ["getCapabilities", "getPermissionState", "execute"],
           geo: ["get", "watch", "clearWatch"],
         },
       };
@@ -1153,6 +1200,34 @@ export function CustomAppRunner({
     if (action === "app.getAssetUrl") {
       const path = normalizeAssetRef(String(record.path ?? ""));
       return app.assets[path]?.dataUrl ?? "";
+    }
+
+    if (action === "reality.getCapabilities") {
+      requirePermission("reality.capabilities.read");
+      return getRealityTransport(record).getCapabilities();
+    }
+    if (action === "reality.getPermissionState") {
+      requirePermission("reality.permission.read");
+      return getRealityTransport(record).getPermissionState();
+    }
+    if (action === "reality.execute") {
+      requirePermission("reality.device.action");
+      const transport = getRealityTransport(record);
+      const capabilities = await transport.getCapabilities();
+      const deviceId = String(record.deviceId ?? record.device_id ?? capabilities.deviceId ?? "").trim();
+      const command = createRealityCommand({
+        commandId: typeof record.commandId === "string" ? record.commandId : undefined,
+        deviceId,
+        action: String(record.action ?? "") as Parameters<typeof createRealityCommand>[0]["action"],
+        payload: recordOf(record.payload),
+        requireConfirm: record.requireConfirm === true || record.require_confirm === true,
+        ttlSeconds: typeof record.ttlSeconds === "number"
+          ? record.ttlSeconds
+          : typeof record.ttl_seconds === "number"
+            ? record.ttl_seconds
+            : undefined,
+      });
+      return transport.execute(command);
     }
 
     if (action === "events.subscribe") {
@@ -1898,7 +1973,7 @@ export function CustomAppRunner({
     }
 
     throw new Error(`未知 AiPhone 动作：${action}`);
-  }, [app, backgroundEvent, backgroundTool, declaredEvents, declaredToolKeys, getFrameAudioChannel, launchContext, onClose, onNotice, postBackgroundEventIfReady, postBackgroundToolIfReady, postHostEvent, requireAnyPermission, requirePermission]);
+  }, [app, backgroundEvent, backgroundTool, declaredEvents, declaredToolKeys, getFrameAudioChannel, getRealityTransport, launchContext, onClose, onNotice, postBackgroundEventIfReady, postBackgroundToolIfReady, postHostEvent, requireAnyPermission, requirePermission]);
 
   useEffect(() => {
     if (isBackgroundRunner) return undefined;
@@ -1983,7 +2058,7 @@ export function CustomAppRunner({
       const data = event.data;
       if (!data || typeof data !== "object") return;
       const record = data as Record<string, unknown>;
-      if (record.source !== "ai-phone-custom-app-frame" || record.frameId !== frameId) return;
+      if (record.source !== "ai-phone-custom-app-frame" || record.frameId !== frameId || record.appId !== app.id) return;
       if (record.type === "event.complete") {
         if (!backgroundEvent || record.backgroundRunId !== backgroundEvent.runId) return;
         const rawErrors = Array.isArray(record.errors) ? record.errors.map(item => String(item)).filter(Boolean) : [];

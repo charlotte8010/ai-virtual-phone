@@ -71,6 +71,7 @@ const ANDROID_ACTIONS = new Set([
   "open_app", "open_url", "open_map", "dial_phone", "share_text", "show_notification",
 ]);
 const ANDROID_DEVICE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const ANDROID_COMMAND_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,160}$/;
 const ANDROID_PAIRING_TOKEN_BYTES = 32;
 const ANDROID_PAIRING_TTL_MS = 10 * 60 * 1000;
 const ANDROID_MAX_PAYLOAD_BYTES = 12_000;
@@ -720,12 +721,15 @@ Deno.serve(async (request: Request) => {
 
     if (action === "android-command" && request.method === "POST") {
       const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const hasCommandId = Object.prototype.hasOwnProperty.call(body, "commandId");
+      const requestedCommandId = cleanText(body.commandId, 160);
       const deviceId = cleanText(body.deviceId, 128);
       const actionName = cleanText(body.action, 40);
       const payload = androidPayload(body.payload);
       const requireConfirm = body.requireConfirm === true;
       const ttlSeconds = Math.max(1, Math.min(3_600, Number(body.ttlSeconds) || 60));
-      if (!ANDROID_DEVICE_ID_PATTERN.test(deviceId) || !ANDROID_ACTIONS.has(actionName) || !payload) {
+      if ((hasCommandId && !ANDROID_COMMAND_ID_PATTERN.test(requestedCommandId))
+        || !ANDROID_DEVICE_ID_PATTERN.test(deviceId) || !ANDROID_ACTIONS.has(actionName) || !payload) {
         return json({ ok: false, error: "Android 命令参数不完整。" }, 400);
       }
       if (!validateAndroidPayload(actionName, payload) || JSON.stringify(payload).length > ANDROID_MAX_PAYLOAD_BYTES) {
@@ -739,7 +743,7 @@ Deno.serve(async (request: Request) => {
         `device_commands?device_id=eq.${encodeURIComponent(deviceId)}&created_at=gte.${encodeURIComponent(new Date(Date.now() - 60_000).toISOString())}&select=id&limit=21`,
       ));
       if (recent.length >= 20) return json({ ok: false, error: "Android 命令触发过于频繁，请稍后再试。" }, 429);
-      const id = `android_cmd_${randomHex(16)}`;
+      const id = requestedCommandId || `android_cmd_${randomHex(16)}`;
       const inserted = await readJson<AndroidCommandRow[]>(await rest("device_commands", {
         method: "POST",
         headers: { Prefer: "return=representation" },

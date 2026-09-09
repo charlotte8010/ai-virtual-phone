@@ -59,6 +59,9 @@ export const PERMISSION_LABELS: Record<string, string> = {
   "wallet.pay": "从钱包付款",
   "bridge.send": "通过现实桥向 iPhone 快捷指令回传数据",
   "bridge.read": "读取现实桥的手机状态快照",
+  "reality.capabilities.read": "读取 Android Reality Bridge 能力与设备状态",
+  "reality.permission.read": "读取 Android Reality Bridge 权限状态",
+  "reality.device.action": "向已绑定 Android 设备下发 Reality 动作",
   "online.play": "多人联机（与其他玩家实时互通，你的昵称会展示给同房间玩家）",
 };
 
