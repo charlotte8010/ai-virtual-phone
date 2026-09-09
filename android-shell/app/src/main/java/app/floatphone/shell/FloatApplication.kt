@@ -16,6 +16,7 @@ import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.core.app.NotificationCompat
+import app.floatphone.shell.reality.actions.RealityActivityVisibility
 import java.lang.ref.WeakReference
 
 /**
@@ -83,8 +84,13 @@ class FloatApplication : Application(), Application.ActivityLifecycleCallbacks {
     }
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
-    override fun onActivityStarted(activity: Activity) = Unit
-    override fun onActivityStopped(activity: Activity) = Unit
+    override fun onActivityStarted(activity: Activity) {
+        RealityActivityVisibility.onActivityStarted()
+    }
+
+    override fun onActivityStopped(activity: Activity) {
+        RealityActivityVisibility.onActivityStopped()
+    }
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 
     private fun findWebView(view: View?): WebView? {

@@ -29,33 +29,33 @@ class AndroidActionExecutor(context: Context) : (DeviceCommand) -> ActionExecuti
         BridgeAction.SHOW_NOTIFICATION -> showNotification(command.payload["title"], command.payload["body"])
     }
 
-    private fun openApp(packageName: String?): ActionExecution = safeStart {
+    private fun openApp(packageName: String?): ActionExecution = safeStartActivity {
         val launchIntent = packageName?.let(packageManager::getLaunchIntentForPackage)
-            ?: return@safeStart ActionExecution.Failure("app_not_found", "requested app is not installed")
+            ?: return@safeStartActivity ActionExecution.Failure("app_not_found", "requested app is not installed")
         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         appContext.startActivity(launchIntent)
         ActionExecution.Success(mapOf("package" to packageName, "started" to "true"))
     }
 
-    private fun openUrl(url: String?): ActionExecution = safeStart {
+    private fun openUrl(url: String?): ActionExecution = safeStartActivity {
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         appContext.startActivity(intent)
         ActionExecution.Success(mapOf("url" to url.orEmpty(), "started" to "true"))
     }
 
-    private fun openMap(destination: String?): ActionExecution = safeStart {
+    private fun openMap(destination: String?): ActionExecution = safeStartActivity {
         val uri = Uri.parse("geo:0,0?q=${Uri.encode(destination.orEmpty())}")
         appContext.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         ActionExecution.Success(mapOf("destination" to destination.orEmpty(), "started" to "true"))
     }
 
-    private fun dialPhone(phone: String?): ActionExecution = safeStart {
+    private fun dialPhone(phone: String?): ActionExecution = safeStartActivity {
         val uri = Uri.parse("tel:${Uri.encode(phone.orEmpty())}")
         appContext.startActivity(Intent(Intent.ACTION_DIAL, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         ActionExecution.Success(mapOf("phone" to phone.orEmpty(), "started" to "true"))
     }
 
-    private fun shareText(text: String?): ActionExecution = safeStart {
+    private fun shareText(text: String?): ActionExecution = safeStartActivity {
         val send = Intent(Intent.ACTION_SEND)
             .setType("text/plain")
             .putExtra(Intent.EXTRA_TEXT, text.orEmpty())
@@ -71,7 +71,7 @@ class AndroidActionExecutor(context: Context) : (DeviceCommand) -> ActionExecuti
         ) {
             return ActionExecution.Failure("notification_permission_required", "notification permission is not granted")
         }
-        return safeStart {
+        return safeNotification {
             val manager = appContext.getSystemService(NotificationManager::class.java)
             if (Build.VERSION.SDK_INT >= 26) {
                 manager.createNotificationChannel(
@@ -96,9 +96,14 @@ class AndroidActionExecutor(context: Context) : (DeviceCommand) -> ActionExecuti
         }
     }
 
-    private fun safeStart(action: () -> ActionExecution): ActionExecution = runCatching { action() }
+    private fun safeStartActivity(action: () -> ActionExecution): ActionExecution {
+        ActivityLaunchPolicy.rejectWhenBackground(RealityActivityVisibility.isVisible())?.let { return it }
+        return runCatching { action() }.getOrElse(ActivityLaunchPolicy::failureFor)
+    }
+
+    private fun safeNotification(action: () -> ActionExecution): ActionExecution = runCatching { action() }
         .getOrElse { error ->
-            ActionExecution.Failure("intent_failed", error.message?.take(240) ?: "native action failed")
+            ActionExecution.Failure("notification_failed", error.message?.take(240) ?: "notification failed")
         }
 
     private companion object {

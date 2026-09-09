@@ -12,6 +12,7 @@ import app.floatphone.shell.reality.data.network.toJson
 import app.floatphone.shell.reality.domain.model.BridgeAction
 import app.floatphone.shell.reality.domain.model.DeviceCapabilities
 import app.floatphone.shell.reality.domain.model.DeviceCredentials
+import app.floatphone.shell.reality.domain.validation.SupabaseKeyClassifier
 import app.floatphone.shell.reality.runtime.RealityBridgeRuntime
 import app.floatphone.shell.reality.runtime.RealityBridgeRuntimeProvider
 import java.net.URI
@@ -135,8 +136,8 @@ class RealityNativeChannel(context: Context) {
         }
         val anonKey = text(raw.optString("anonKey", ""), 4096, "anonKey")
         val deviceToken = text(raw.optString("deviceToken", ""), 4096, "deviceToken")
-        require(!anonKey.contains("service_role", ignoreCase = true)) { "service role credentials are not accepted" }
-        require(!deviceToken.contains("service_role", ignoreCase = true)) { "service role credentials are not accepted" }
+        require(!SupabaseKeyClassifier.isElevatedKey(anonKey)) { "service role credentials are not accepted" }
+        require(!SupabaseKeyClassifier.isElevatedKey(deviceToken)) { "service role credentials are not accepted" }
         val capabilities = raw.optJSONArray("capabilities")?.let(::parseCapabilities)
             ?: throw IllegalArgumentException("capabilities are required")
         return DeviceCredentials(

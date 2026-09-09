@@ -14,6 +14,31 @@ const transpiled = ts.transpileModule(source, {
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(transpiled.outputText).toString("base64")}`;
 const protocol = await import(moduleUrl);
 
+const base64url = value => Buffer.from(value, "utf8").toString("base64url");
+const legacyServiceRoleJwt = [
+  base64url(JSON.stringify({ alg: "none", typ: "JWT" })),
+  base64url(JSON.stringify({ role: "service_role", ref: "bridge-project", iss: "supabase" })),
+  "test-signature",
+].join(".");
+const urlSafeServiceRoleJwt = [
+  base64url(JSON.stringify({ alg: "none", typ: "JWT" })),
+  base64url(JSON.stringify({ role: "service_role", scope: "~_?" })),
+  "test-signature",
+].join(".");
+const legacyAuthenticatedJwt = [
+  base64url(JSON.stringify({ alg: "none", typ: "JWT" })),
+  base64url(JSON.stringify({ role: "authenticated", ref: "bridge-project", iss: "supabase" })),
+  "test-signature",
+].join(".");
+
+assert.equal(legacyServiceRoleJwt.includes("service_role"), false);
+assert.equal(protocol.isSupabaseElevatedKey(legacyServiceRoleJwt), true);
+assert.equal(protocol.isSupabaseElevatedKey(urlSafeServiceRoleJwt), true);
+assert.equal(protocol.isSupabaseElevatedKey("sb_secret_live_key_shape"), true);
+assert.equal(protocol.isSupabaseElevatedKey("sb_publishable_live_key_shape"), false);
+assert.equal(protocol.isSupabaseElevatedKey(legacyAuthenticatedJwt), false);
+assert.equal(protocol.isSupabaseElevatedKey("opaque-service_role-like-value"), false);
+
 assert.deepEqual(protocol.REALITY_APP_PERMISSIONS, [
   "reality.capabilities.read",
   "reality.permission.read",
@@ -41,7 +66,15 @@ assert.throws(
   () => protocol.createRealityNativeRequest({
     requestId: "native-binding-0b",
     operation: "completeBinding",
-    credentials: { ...deviceCredentials, anonKey: "service_role-secret" },
+    credentials: { ...deviceCredentials, anonKey: "sb_secret_live_key_shape" },
+  }),
+  /service role|credentials/,
+);
+assert.throws(
+  () => protocol.createRealityNativeRequest({
+    requestId: "native-binding-0c",
+    operation: "completeBinding",
+    credentials: { ...deviceCredentials, deviceToken: legacyServiceRoleJwt },
   }),
   /service role|credentials/,
 );

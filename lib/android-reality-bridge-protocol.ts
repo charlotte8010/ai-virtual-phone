@@ -184,6 +184,34 @@ function recordOf(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function decodeBase64UrlUtf8(value: string): string | null {
+  try {
+    if (typeof globalThis.atob !== "function") return null;
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const binary = globalThis.atob(padded);
+    return new TextDecoder().decode(Uint8Array.from(binary, character => character.charCodeAt(0)));
+  } catch {
+    return null;
+  }
+}
+
+/** Recognizes both legacy JWT service_role keys and current sb_secret_ keys. */
+export function isSupabaseElevatedKey(value: string): boolean {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim();
+  if (normalized.toLowerCase().startsWith("sb_secret_")) return true;
+  const parts = normalized.split(".");
+  if (parts.length !== 3) return false;
+  const payload = decodeBase64UrlUtf8(parts[1]);
+  if (!payload) return false;
+  try {
+    return recordOf(JSON.parse(payload)).role === "service_role";
+  } catch {
+    return false;
+  }
+}
+
 function stringValue(value: unknown, field: string, maxLength: number): string {
   if (typeof value !== "string") throw new Error(`${field} must be text`);
   const trimmed = value.trim();
@@ -402,7 +430,7 @@ export function normalizeRealityDeviceCredentials(input: unknown): RealityDevice
   }
   const anonKey = requiredText(value.anonKey ?? value.anon_key, "anonKey", 4096);
   const deviceToken = requiredText(value.deviceToken ?? value.device_token, "deviceToken", 4096);
-  if (/service_role/i.test(anonKey) || /service_role/i.test(deviceToken)) {
+  if (isSupabaseElevatedKey(anonKey) || isSupabaseElevatedKey(deviceToken)) {
     throw new RealityProtocolError("INVALID_BINDING", "service role credentials are not accepted");
   }
   const rawCapabilities = value.capabilities ?? value.actions;
