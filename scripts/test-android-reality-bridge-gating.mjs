@@ -17,4 +17,22 @@ assert.match(html, /当前设备不支持 \" \+ state\.action/, "the action gate
 assert.match(html, /renderExecutionGate\(\)/, "renderState and busy transitions must refresh the gate");
 assert.match(html, /var blockedReason = executionBlockReason\(\)/, "execute must re-check the UI gate before dispatch");
 
+const functionMatch = html.match(/function executionBlockReason\(\) \{\n([\s\S]*?)\n  \}\n  function renderExecutionGate/);
+assert.ok(functionMatch, "execution gating function body must be extractable for behavior tests");
+const executionBlockReason = new Function("state", "currentDeviceId", "selectedDevice", functionMatch[1]);
+const evaluate = (state, deviceId, device) => executionBlockReason(state, () => deviceId, () => device);
+
+assert.equal(
+  evaluate({ action: "show_notification", busy: false, permission: { canExecute: false } }, "device-1", null),
+  "当前设备不可执行 Reality 动作",
+);
+assert.equal(
+  evaluate({ action: "show_notification", busy: false, permission: { canExecute: true } }, "device-1", { actions: ["open_app"] }),
+  "当前设备不支持 show_notification",
+);
+assert.equal(
+  evaluate({ action: "show_notification", busy: false, permission: { canExecute: true } }, "device-1", { actions: ["show_notification"] }),
+  "",
+);
+
 console.log("Android Reality Bridge execution gating tests passed");

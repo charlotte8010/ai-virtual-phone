@@ -89,6 +89,7 @@
   .confirm { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
   .confirm input { width: auto; }
   .hint-line { width: 100%; margin: 0; color: var(--muted); font-size: 11px; }
+  .action-gate-hint { color: var(--danger); font-weight: 700; }
   .notice { margin-bottom: 14px; border: 1px solid rgba(44,110,145,.2); border-radius: 11px; padding: 10px 12px; color: var(--blue-deep); background: rgba(225,237,239,.78); font-size: 12px; }
   .notice.error { border-color: rgba(180,70,61,.25); color: var(--danger); background: rgba(255,236,230,.85); }
   .notice.success { border-color: rgba(45,128,107,.24); color: var(--mint); background: rgba(228,244,237,.85); }
@@ -168,6 +169,7 @@
       <button id="executeBtn" class="btn copper" type="button">执行这个动作</button>
       <label class="ttl">TTL <input id="ttlInput" type="number" min="1" max="900" value="60" inputmode="numeric"> 秒</label>
       <label class="confirm"><input id="confirmInput" type="checkbox"> 请求本机确认</label>
+      <p id="executeHint" class="hint-line action-gate-hint" role="status" aria-live="polite" hidden></p>
       <p class="hint-line">默认不请求确认；后台 Activity 动作若受系统限制会返回明确失败结果。</p>
     </div>
   </section>
@@ -208,6 +210,7 @@
     canExecuteValue: $("canExecuteValue"), androidValue: $("androidValue"), permissionList: $("permissionList"),
     capabilityList: $("capabilityList"), actionCopy: $("actionCopy"), fieldGrid: $("fieldGrid"),
     executeBtn: $("executeBtn"), ttlInput: $("ttlInput"), confirmInput: $("confirmInput"),
+    executeHint: $("executeHint"),
     lastTransport: $("lastTransport"), commandPreview: $("commandPreview"), resultMeta: $("resultMeta"),
     resultPreview: $("resultPreview"), logList: $("logList")
   };
@@ -246,6 +249,25 @@
     var caps = state.capabilities || {};
     return state.selectedDeviceId || caps.deviceId || "";
   }
+  function executionBlockReason() {
+    if (state.busy) return "正在处理上一条动作…";
+    if (!currentDeviceId()) return "没有可执行的目标设备；请先完成配对或连接远程设备。";
+    var permission = state.permission;
+    if (!permission || permission.canExecute !== true) return "当前设备不可执行 Reality 动作";
+    var device = selectedDevice();
+    if (device && Array.isArray(device.actions) && !device.actions.includes(state.action)) {
+      return "当前设备不支持 " + state.action;
+    }
+    return "";
+  }
+  function renderExecutionGate() {
+    var blockedReason = executionBlockReason();
+    refs.executeBtn.disabled = Boolean(blockedReason);
+    refs.executeBtn.title = blockedReason;
+    refs.executeBtn.setAttribute("aria-disabled", blockedReason ? "true" : "false");
+    refs.executeHint.textContent = blockedReason;
+    refs.executeHint.hidden = !blockedReason;
+  }
   function renderDeviceOptions() {
     var caps = state.capabilities;
     refs.deviceSelect.replaceChildren();
@@ -282,6 +304,7 @@
     var permission = state.permission;
     var device = selectedDevice();
     renderDeviceOptions();
+    renderExecutionGate();
     if (!caps || !permission) {
       refs.transportPill.textContent = "未连接"; refs.transportPill.className = "transport-pill";
       [refs.transportValue, refs.onlineValue, refs.deviceNameValue, refs.boundValue, refs.deviceIdValue, refs.canExecuteValue, refs.androidValue].forEach(function (element) { setValue(element, "—"); });
@@ -302,7 +325,6 @@
     renderChips(refs.permissionList, permissionNames, nativePermissions);
     var actions = device && Array.isArray(device.actions) ? device.actions : (Array.isArray(caps.actions) ? caps.actions : []);
     renderChips(refs.capabilityList, actions);
-    refs.executeBtn.disabled = state.busy || !currentDeviceId();
   }
   function renderActionForm() {
     var spec = ACTIONS[state.action];
@@ -341,7 +363,7 @@
   function setBusy(value) {
     state.busy = value;
     refs.refreshBtn.disabled = value;
-    refs.executeBtn.disabled = value || !currentDeviceId();
+    renderExecutionGate();
     document.querySelectorAll("[data-action]").forEach(function (button) { button.disabled = value; });
   }
   function renderResult(result) {
@@ -369,9 +391,10 @@
   async function execute() {
     if (!hasRealityApi()) { setNotice("当前宿主没有提供 Reality 通道。", "error"); return; }
     try {
-      if (!state.capabilities) await refresh();
+      if (!state.capabilities || !state.permission) await refresh();
+      var blockedReason = executionBlockReason();
+      if (blockedReason) { setNotice(blockedReason, "error"); return; }
       var deviceId = currentDeviceId();
-      if (!deviceId) throw new Error("没有可执行的目标设备；请先完成配对或连接远程设备。");
       var ttl = Number(refs.ttlInput.value);
       if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > 900) throw new Error("TTL 必须是 1–900 秒的整数。");
       var command = { deviceId: deviceId, action: state.action, payload: payloadFromForm(), requireConfirm: refs.confirmInput.checked, ttlSeconds: ttl };
@@ -390,7 +413,7 @@
   }
   refs.refreshBtn.addEventListener("click", function () { void refresh(); });
   refs.deviceSelect.addEventListener("change", function () { state.selectedDeviceId = refs.deviceSelect.value; renderState(); });
-  document.querySelectorAll("[data-action]").forEach(function (button) { button.addEventListener("click", function () { state.action = button.dataset.action; renderActionForm(); }); });
+  document.querySelectorAll("[data-action]").forEach(function (button) { button.addEventListener("click", function () { state.action = button.dataset.action; renderActionForm(); renderState(); }); });
   refs.executeBtn.addEventListener("click", function () { void execute(); });
   renderActionForm(); renderState();
   if (hasRealityApi()) void refresh();
