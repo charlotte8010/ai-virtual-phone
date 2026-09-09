@@ -1,17 +1,26 @@
 package app.floatphone.shell
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
+import app.floatphone.shell.reality.data.local.DeviceCredentialStore
+import app.floatphone.shell.reality.data.local.KeystoreCredentialStore
+import app.floatphone.shell.reality.data.local.RealityIdentityStore
+import app.floatphone.shell.reality.data.network.DeviceCommandParser
+import app.floatphone.shell.reality.data.network.toJson
+import app.floatphone.shell.reality.domain.model.BridgeAction
+import app.floatphone.shell.reality.domain.model.DeviceCapabilities
+import app.floatphone.shell.reality.domain.model.DeviceCredentials
+import app.floatphone.shell.reality.runtime.RealityBridgeRuntime
+import app.floatphone.shell.reality.runtime.RealityBridgeRuntimeProvider
+import java.net.URI
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.UUID
 
 /**
- * Phase 1 protocol endpoint for the top-level Float page.
- *
- * This class deliberately exposes capability/permission state only. Native
- * action execution is wired in the next phase after the shared contract is
- * reviewed; an execute request is validated and returns NOT_READY.
+ * Top-level Float protocol endpoint. It validates and executes commands through
+ * the shared runtime; custom-app iframes never receive this object directly.
  */
 class RealityNativeChannel(context: Context) {
 
@@ -21,23 +30,21 @@ class RealityNativeChannel(context: Context) {
         private const val CHANNEL_ID = "float.reality"
         private const val MAX_MESSAGE_CHARS = 64_000
         private const val REQUEST_ID_MAX = 160
-        private const val DEVICE_ID_KEY = "device_id"
         private const val USED_BINDING_NONCES_KEY = "used_binding_nonces"
         private const val MAX_USED_BINDING_NONCES = 32
         private const val PREFS = "float_shell_reality_identity"
 
-        private val ACTIONS = setOf(
-            "open_app",
-            "open_url",
-            "open_map",
-            "dial_phone",
-            "share_text",
-            "show_notification",
-        )
+        private val ACTIONS = BridgeAction.entries.toSet()
     }
 
     private val appContext = context.applicationContext
+    private val identityStore = RealityIdentityStore(appContext)
+    private val credentialStore: DeviceCredentialStore = KeystoreCredentialStore(appContext)
+    private val commandParser = DeviceCommandParser()
+    private val runtime: RealityBridgeRuntime
+        get() = RealityBridgeRuntimeProvider.get(appContext)
     private val identityPrefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val bindingLock = Any()
 
     fun handle(rawMessage: String, isMainFrame: Boolean): String {
         if (!isMainFrame) return errorResponse("", "", "FRAME_NOT_ALLOWED", "Reality channel only accepts the top-level Float page")
@@ -61,84 +68,152 @@ class RealityNativeChannel(context: Context) {
 
         return when (operation) {
             "prepareBinding" -> prepareBinding(requestId, operation, request.optString("bindingNonce", ""))
+            "completeBinding" -> completeBinding(requestId, operation, request.optJSONObject("credentials"))
             "getCapabilities" -> successResponse(requestId, operation, capabilities())
             "getPermissionState" -> successResponse(requestId, operation, permissionState())
-            "execute" -> validateExecute(requestId, operation, request.optJSONObject("command"))
+            "execute" -> execute(requestId, operation, request.optJSONObject("command"))
             else -> errorResponse(requestId, operation, "INVALID_OPERATION", "Reality operation is unsupported")
         }
     }
 
-    private fun prepareBinding(requestId: String, operation: String, nonce: String): String {
+    private fun prepareBinding(requestId: String, operation: String, nonce: String): String = synchronized(bindingLock) {
         if (!nonce.matches(Regex("[A-Za-z0-9_-]{32,256}"))) {
-            return errorResponse(requestId, operation, "INVALID_BINDING", "binding nonce is invalid")
+            return@synchronized errorResponse(requestId, operation, "INVALID_BINDING", "binding nonce is invalid")
         }
         val usedNonces = loadUsedBindingNonces()
         if (usedNonces.contains(nonce)) {
-            return errorResponse(requestId, operation, "NONCE_REPLAY", "binding nonce has already been used")
+            return@synchronized errorResponse(requestId, operation, "NONCE_REPLAY", "binding nonce has already been used")
         }
         saveUsedBindingNonces((usedNonces + nonce).takeLast(MAX_USED_BINDING_NONCES))
-        return successResponse(
+        successResponse(
             requestId,
             operation,
             JSONObject()
                 .put("protocolVersion", PROTOCOL_VERSION)
-                .put("deviceId", stableDeviceId())
+                .put("deviceId", identityStore.deviceId())
                 .put("nonce", nonce)
-                .put("publicKey", JSONObject.NULL),
+                .put("publicKey", identityStore.publicKeyBase64()),
         )
     }
 
-    private fun validateExecute(requestId: String, operation: String, command: JSONObject?): String {
-        if (command == null) return errorResponse(requestId, operation, "INVALID_COMMAND", "execute requires command")
-        val commandId = command.optString("commandId", "")
-        val deviceId = command.optString("deviceId", "")
-        val action = command.optString("action", "")
-        if (!validRequestId(commandId)) return errorResponse(requestId, operation, "INVALID_COMMAND_ID", "commandId is invalid")
-        if (!deviceId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) {
-            return errorResponse(requestId, operation, "INVALID_DEVICE_ID", "deviceId is invalid")
+    private fun completeBinding(requestId: String, operation: String, raw: JSONObject?): String {
+        val credentials = runCatching { parseCredentials(raw) }.getOrElse { error ->
+            return errorResponse(requestId, operation, "INVALID_BINDING", error.message ?: "binding credentials are invalid")
         }
-        if (!ACTIONS.contains(action)) return errorResponse(requestId, operation, "UNSUPPORTED_ACTION", "Reality action is unsupported")
-        if (command.opt("payload") !is JSONObject) {
-            return errorResponse(requestId, operation, "INVALID_PAYLOAD", "command payload is invalid")
+        if (credentials.deviceId != identityStore.deviceId()) {
+            return errorResponse(requestId, operation, "DEVICE_MISMATCH", "binding credentials target another device")
         }
-        val ttlSeconds = command.optInt("ttlSeconds", -1)
-        if (ttlSeconds !in 1..900) return errorResponse(requestId, operation, "INVALID_TTL", "ttlSeconds is invalid")
-        if (deviceId != stableDeviceId()) {
-            return errorResponse(requestId, operation, "DEVICE_MISMATCH", "command device does not match this shell")
+        runCatching { credentialStore.save(credentials) }.getOrElse { error ->
+            return errorResponse(
+                requestId,
+                operation,
+                "BINDING_STORAGE_FAILED",
+                error.message ?: "binding credentials could not be stored",
+            )
         }
+        PushService.requestRealityReconnect(appContext)
+        return successResponse(
+            requestId,
+            operation,
+            JSONObject()
+                .put("deviceId", credentials.deviceId)
+                .put("deviceName", credentials.deviceName)
+                .put("bound", true)
+                .put("actions", JSONArray(credentials.capabilities.toWireNames())),
+        )
+    }
 
-        // The command schema is accepted, but action execution is intentionally
-        // deferred until the post-review Reality runtime migration phase.
-        return errorResponse(requestId, operation, "NOT_READY", "local Reality runtime is not enabled yet")
+    private fun parseCredentials(raw: JSONObject?): DeviceCredentials {
+        require(raw != null) { "binding credentials are required" }
+        val deviceId = text(raw.optString("deviceId", ""), 128, "deviceId")
+        require(deviceId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) { "deviceId is invalid" }
+        val deviceName = text(raw.optString("deviceName", ""), 120, "deviceName")
+        val supabaseUrl = text(raw.optString("supabaseUrl", "").trimEnd('/'), 4096, "supabaseUrl")
+        val uri = runCatching { URI(supabaseUrl) }.getOrNull()
+        require(uri != null && uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrBlank()) {
+            "supabaseUrl must use HTTPS"
+        }
+        val anonKey = text(raw.optString("anonKey", ""), 4096, "anonKey")
+        val deviceToken = text(raw.optString("deviceToken", ""), 4096, "deviceToken")
+        require(!anonKey.contains("service_role", ignoreCase = true)) { "service role credentials are not accepted" }
+        require(!deviceToken.contains("service_role", ignoreCase = true)) { "service role credentials are not accepted" }
+        val capabilities = raw.optJSONArray("capabilities")?.let(::parseCapabilities)
+            ?: throw IllegalArgumentException("capabilities are required")
+        return DeviceCredentials(
+            deviceId = deviceId,
+            deviceName = deviceName,
+            supabaseUrl = supabaseUrl,
+            anonKey = anonKey,
+            deviceToken = deviceToken,
+            capabilities = DeviceCapabilities(capabilities),
+        )
+    }
+
+    private fun parseCapabilities(raw: JSONArray): List<BridgeAction> {
+        require(raw.length() in 1..ACTIONS.size) { "capabilities are invalid" }
+        val parsed = (0 until raw.length()).map { index ->
+            BridgeAction.fromWire(raw.optString(index)) ?: throw IllegalArgumentException("capability is invalid")
+        }
+        require(parsed.toSet().size == parsed.size) { "capabilities contain duplicates" }
+        return parsed
+    }
+
+    private fun execute(requestId: String, operation: String, raw: JSONObject?): String {
+        if (raw == null) return errorResponse(requestId, operation, "INVALID_COMMAND", "execute requires command")
+        val commandEnvelope = JSONObject()
+            .put("event", "broadcast")
+            .put("payload", JSONObject().put("payload", raw))
+        val command = commandParser.parse(commandEnvelope.toString())
+            ?: return errorResponse(requestId, operation, "INVALID_COMMAND", "command fields are invalid")
+        val result = runtime.executeLocal(command)
+            ?: return errorResponse(requestId, operation, "DUPLICATE_COMMAND", "command has already been completed or is in flight")
+        val resultJson = JSONObject()
+            .put("commandId", result.commandId)
+            .put("deviceId", result.deviceId)
+            .put("status", result.status.wireName)
+            .put("result", result.result.toJson())
+            .put("completedAt", java.time.Instant.ofEpochMilli(result.completedAtEpochMs).toString())
+        result.errorCode?.let { resultJson.put("errorCode", it) }
+        result.errorMessage?.let { resultJson.put("errorMessage", it) }
+        return successResponse(requestId, operation, resultJson)
     }
 
     private fun capabilities(): JSONObject = JSONObject()
         .put("protocolVersion", PROTOCOL_VERSION)
         .put("transport", "local_native")
-        .put("deviceId", stableDeviceId())
-        .put("deviceName", Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android device")
-        .put("online", false)
-        .put("actions", JSONArray())
+        .put("deviceId", identityStore.deviceId())
+        .put("deviceName", Build.MODEL?.takeIf(String::isNotBlank) ?: "Android device")
+        .put("online", true)
+        .put("actions", JSONArray(RealityBridgeRuntime.LOCAL_ACTIONS.map(BridgeAction::wireName)))
 
-    private fun permissionState(): JSONObject = JSONObject()
-        .put("protocolVersion", PROTOCOL_VERSION)
-        .put("transport", "local_native")
-        .put("deviceId", stableDeviceId())
-        .put("bound", false)
-        .put("canExecute", false)
-        .put("nativePermissions", JSONObject())
+    private fun permissionState(): JSONObject {
+        val notificationStatus = if (Build.VERSION.SDK_INT < 33) {
+            "unavailable"
+        } else if (appContext.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            "granted"
+        } else {
+            "denied"
+        }
+        return JSONObject()
+            .put("protocolVersion", PROTOCOL_VERSION)
+            .put("transport", "local_native")
+            .put("deviceId", identityStore.deviceId())
+            .put("bound", credentialStore.load()?.deviceId == identityStore.deviceId())
+            .put("canExecute", true)
+            .put("nativePermissions", JSONObject().put(Manifest.permission.POST_NOTIFICATIONS, notificationStatus))
+    }
 
-    private fun stableDeviceId(): String {
-        identityPrefs.getString(DEVICE_ID_KEY, null)?.takeIf { it.isNotBlank() }?.let { return it }
-        val created = "shell_${UUID.randomUUID().toString().replace("-", "")}".take(128)
-        identityPrefs.edit().putString(DEVICE_ID_KEY, created).apply()
-        return created
+    private fun text(value: String, maxLength: Int, field: String): String {
+        require(value.isNotBlank() && value.length <= maxLength && value.all { it.code >= 0x20 && it != '\u007f' }) {
+            "$field is invalid"
+        }
+        return value
     }
 
     private fun loadUsedBindingNonces(): List<String> = runCatching {
         val raw = identityPrefs.getString(USED_BINDING_NONCES_KEY, null) ?: return emptyList()
         val values = JSONArray(raw)
-        (0 until values.length()).mapNotNull { index -> values.optString(index).takeIf { it.isNotBlank() } }
+        (0 until values.length()).mapNotNull { index -> values.optString(index).takeIf(String::isNotBlank) }
     }.getOrDefault(emptyList())
 
     private fun saveUsedBindingNonces(nonces: List<String>) {

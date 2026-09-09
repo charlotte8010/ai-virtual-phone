@@ -12,6 +12,7 @@ import {
   type RealityBindingMaterial,
   type RealityCommand,
   type RealityCommandResult,
+  type RealityDeviceCredentials,
   type RealityPermissionState,
 } from "../android-reality-bridge-protocol";
 import type { NativeRealityChannel } from "./native-channel";
@@ -47,7 +48,8 @@ function toDeviceSummary(device: AndroidDevice) {
 
 /**
  * Local transport. It only speaks the controlled WebMessage channel;
- * Android action execution is deliberately not implemented in this phase.
+ * Android action execution stays behind the native runtime and never enters
+ * the browser-side custom-app sandbox.
  */
 export class LocalNativeTransport implements RealityTransport {
   readonly kind = "local_native" as const;
@@ -56,6 +58,10 @@ export class LocalNativeTransport implements RealityTransport {
 
   async prepareBinding(nonce = createRealityBindingNonce()): Promise<RealityBindingMaterial> {
     return normalizeRealityBindingMaterial(await this.channel.request("prepareBinding", undefined, nonce));
+  }
+
+  async completeBinding(credentials: RealityDeviceCredentials): Promise<unknown> {
+    return this.channel.request("completeBinding", undefined, undefined, credentials);
   }
 
   async getCapabilities(): Promise<RealityCapabilities> {

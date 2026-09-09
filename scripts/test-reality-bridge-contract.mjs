@@ -23,6 +23,29 @@ assert.equal(protocol.REALITY_NATIVE_CHANNEL_NAME, "FloatRealityChannel");
 assert.equal(protocol.REALITY_PROTOCOL_VERSION, 1);
 assert.match(protocol.createRealityBindingNonce(), /^[A-Za-z0-9_-]{32,256}$/);
 
+const deviceCredentials = {
+  deviceId: "shell-device-1",
+  deviceName: "Pixel",
+  supabaseUrl: "https://example.supabase.co",
+  anonKey: "anon-test-key",
+  deviceToken: "device-jwt-token",
+  capabilities: ["show_notification"],
+};
+const completeBindingRequest = protocol.createRealityNativeRequest({
+  requestId: "native-binding-0",
+  operation: "completeBinding",
+  credentials: deviceCredentials,
+});
+assert.deepEqual(completeBindingRequest.credentials, deviceCredentials);
+assert.throws(
+  () => protocol.createRealityNativeRequest({
+    requestId: "native-binding-0b",
+    operation: "completeBinding",
+    credentials: { ...deviceCredentials, anonKey: "service_role-secret" },
+  }),
+  /service role|credentials/,
+);
+
 const bindingRequest = protocol.createRealityNativeRequest({
   requestId: "native-binding-1",
   operation: "prepareBinding",
@@ -46,6 +69,14 @@ assert.throws(
 assert.throws(
   () => protocol.createRealityNativeRequest({ requestId: "native-binding-3", operation: "getCapabilities", bindingNonce: "n".repeat(32) }),
   /only valid/,
+);
+assert.throws(
+  () => protocol.createRealityNativeRequest({
+    requestId: "native-binding-4",
+    operation: "getCapabilities",
+    command: {},
+  }),
+  /only valid for execute/,
 );
 
 const command = protocol.createRealityCommand({

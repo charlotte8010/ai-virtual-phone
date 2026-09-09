@@ -7,7 +7,7 @@ export const ANDROID_BRIDGE_ACTIONS = [
   "show_notification",
 ] as const;
 
-/** Shared Reality Bridge wire contract. Native execution is added in a later phase. */
+/** Shared Reality Bridge wire contract for local native and remote cloud execution. */
 export const REALITY_PROTOCOL_VERSION = 1 as const;
 export const REALITY_NATIVE_CHANNEL_NAME = "FloatRealityChannel" as const;
 export const REALITY_NATIVE_CHANNEL_ID = "float.reality" as const;
@@ -26,7 +26,7 @@ export const REALITY_HOST_ACTIONS = [
 export type RealityAppPermission = (typeof REALITY_APP_PERMISSIONS)[number];
 export type RealityHostAction = (typeof REALITY_HOST_ACTIONS)[number];
 export type RealityTransportKind = "local_native" | "remote_cloud";
-export type RealityNativeOperation = "prepareBinding" | "getCapabilities" | "getPermissionState" | "execute";
+export type RealityNativeOperation = "prepareBinding" | "completeBinding" | "getCapabilities" | "getPermissionState" | "execute";
 export type RealityPermissionStatus = "granted" | "denied" | "prompt" | "unavailable" | "unknown";
 
 export class RealityProtocolError extends Error {
@@ -132,12 +132,23 @@ export type RealityPermissionState = {
   nativePermissions: Record<string, RealityPermissionStatus>;
 };
 
+/** Device credentials handed from an authenticated Float Host to Native storage. */
+export type RealityDeviceCredentials = {
+  deviceId: string;
+  deviceName: string;
+  supabaseUrl: string;
+  anonKey: string;
+  deviceToken: string;
+  capabilities: AndroidBridgeAction[];
+};
+
 export type RealityNativeRequest = {
   protocolVersion: typeof REALITY_PROTOCOL_VERSION;
   channel: typeof REALITY_NATIVE_CHANNEL_ID;
   requestId: string;
   operation: RealityNativeOperation;
   bindingNonce?: string;
+  credentials?: RealityDeviceCredentials;
   command?: RealityCommand;
 };
 
@@ -280,6 +291,7 @@ export function createRealityNativeRequest(input: {
   requestId: string;
   operation: RealityNativeOperation;
   bindingNonce?: string;
+  credentials?: RealityDeviceCredentials;
   command?: RealityCommand;
 }): RealityNativeRequest {
   const requestId = requiredText(input.requestId, "requestId", 160);
@@ -298,16 +310,29 @@ export function createRealityNativeRequest(input: {
   if (input.operation === "execute" && !input.command) {
     throw new RealityProtocolError("INVALID_REQUEST", "execute requires command");
   }
+  if (input.operation !== "execute" && input.command !== undefined) {
+    throw new RealityProtocolError("INVALID_REQUEST", "command is only valid for execute");
+  }
   if (input.operation !== "getCapabilities" && input.operation !== "getPermissionState"
-    && input.operation !== "execute" && input.operation !== "prepareBinding") {
+    && input.operation !== "execute" && input.operation !== "prepareBinding" && input.operation !== "completeBinding") {
     throw new RealityProtocolError("INVALID_OPERATION", "operation is invalid");
   }
+  if (input.operation === "completeBinding" && !input.credentials) {
+    throw new RealityProtocolError("INVALID_BINDING", "completeBinding requires credentials");
+  }
+  if (input.operation !== "completeBinding" && input.credentials !== undefined) {
+    throw new RealityProtocolError("INVALID_BINDING", "credentials are only valid for completeBinding");
+  }
+  const credentials = input.operation === "completeBinding"
+    ? normalizeRealityDeviceCredentials(input.credentials)
+    : undefined;
   return {
     protocolVersion: REALITY_PROTOCOL_VERSION,
     channel: REALITY_NATIVE_CHANNEL_ID,
     requestId,
     operation: input.operation,
     ...(input.bindingNonce ? { bindingNonce: input.bindingNonce } : {}),
+    ...(credentials ? { credentials } : {}),
     ...(input.command ? { command: input.command } : {}),
   };
 }
@@ -322,7 +347,7 @@ export function parseRealityNativeRequest(input: unknown): RealityNativeRequest 
   }
   const operation = value.operation;
   if (operation !== "getCapabilities" && operation !== "getPermissionState"
-    && operation !== "execute" && operation !== "prepareBinding") {
+    && operation !== "execute" && operation !== "prepareBinding" && operation !== "completeBinding") {
     throw new RealityProtocolError("INVALID_OPERATION", "operation is invalid");
   }
   const requestId = requiredText(value.requestId, "requestId", 160);
@@ -352,7 +377,42 @@ export function parseRealityNativeRequest(input: unknown): RealityNativeRequest 
       createdAt: String(raw.createdAt ?? ""),
     });
   }
-  return createRealityNativeRequest({ requestId, operation, bindingNonce, command });
+  const credentials = operation === "completeBinding"
+    ? normalizeRealityDeviceCredentials(value.credentials)
+    : undefined;
+  return createRealityNativeRequest({ requestId, operation, bindingNonce, command, credentials });
+}
+
+export function normalizeRealityDeviceCredentials(input: unknown): RealityDeviceCredentials {
+  const value = recordOf(input);
+  const deviceId = requiredText(value.deviceId ?? value.device_id, "deviceId", 128);
+  if (!DEVICE_ID_PATTERN.test(deviceId)) {
+    throw new RealityProtocolError("INVALID_DEVICE_ID", "deviceId is invalid");
+  }
+  const deviceName = requiredText(value.deviceName ?? value.device_name, "deviceName", 120);
+  const supabaseUrl = requiredText(value.supabaseUrl ?? value.supabase_url, "supabaseUrl", 4096);
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(supabaseUrl);
+  } catch {
+    throw new RealityProtocolError("INVALID_BINDING", "supabaseUrl is invalid");
+  }
+  if (parsedUrl.protocol !== "https:" || !parsedUrl.hostname) {
+    throw new RealityProtocolError("INVALID_BINDING", "supabaseUrl must use HTTPS");
+  }
+  const anonKey = requiredText(value.anonKey ?? value.anon_key, "anonKey", 4096);
+  const deviceToken = requiredText(value.deviceToken ?? value.device_token, "deviceToken", 4096);
+  if (/service_role/i.test(anonKey) || /service_role/i.test(deviceToken)) {
+    throw new RealityProtocolError("INVALID_BINDING", "service role credentials are not accepted");
+  }
+  const rawCapabilities = value.capabilities ?? value.actions;
+  const capabilities = Array.isArray(rawCapabilities)
+    ? rawCapabilities.filter(isAction)
+    : [];
+  if (capabilities.length === 0 || new Set(capabilities).size !== capabilities.length) {
+    throw new RealityProtocolError("INVALID_BINDING", "capabilities are invalid");
+  }
+  return { deviceId, deviceName, supabaseUrl: parsedUrl.toString().replace(/\/$/, ""), anonKey, deviceToken, capabilities };
 }
 
 export function normalizeRealityCapabilities(input: unknown): RealityCapabilities {
@@ -429,7 +489,7 @@ export function normalizeRealityNativeResponse(input: unknown): RealityNativeRes
   }
   const operation = value.operation;
   if (operation !== "getCapabilities" && operation !== "getPermissionState"
-    && operation !== "execute" && operation !== "prepareBinding") {
+    && operation !== "execute" && operation !== "prepareBinding" && operation !== "completeBinding") {
     throw new RealityProtocolError("INVALID_RESPONSE", "native Reality response operation is invalid");
   }
   const requestId = requiredText(value.requestId, "requestId", 160);

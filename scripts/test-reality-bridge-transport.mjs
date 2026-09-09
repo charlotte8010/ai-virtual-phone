@@ -29,17 +29,28 @@ const localChannel = {
     if (operation === "getPermissionState") {
       return { protocolVersion: 1, transport: "local_native", deviceId: "shell-device-1", bound: false, canExecute: false, nativePermissions: {} };
     }
+    if (operation === "completeBinding") {
+      return { deviceId: "shell-device-1", bound: true };
+    }
     return { commandId: requestedCommand.commandId, deviceId: requestedCommand.deviceId, status: "rejected", result: {}, errorCode: "NOT_READY", errorMessage: "not ready", completedAt: "2026-09-09T00:00:00.000Z" };
   },
 };
 const local = new transport.LocalNativeTransport(localChannel);
 assert.equal((await local.prepareBinding()).deviceId, "shell-device-1");
 assert.match(localRequests[0].bindingNonce, /^[A-Za-z0-9_-]{32,256}$/);
+await local.completeBinding({
+  deviceId: "shell-device-1",
+  deviceName: "Pixel",
+  supabaseUrl: "https://example.supabase.co",
+  anonKey: "anon-test-key",
+  deviceToken: "device-jwt-token",
+  capabilities: ["show_notification"],
+});
 assert.equal((await local.getCapabilities()).transport, "local_native");
 assert.equal((await local.getPermissionState()).bound, false);
 assert.equal((await local.execute(command)).status, "rejected");
-assert.deepEqual(localRequests.map(item => item.operation), ["prepareBinding", "getCapabilities", "getPermissionState", "execute"]);
-assert.equal(localRequests[3].command.commandId, command.commandId);
+assert.deepEqual(localRequests.map(item => item.operation), ["prepareBinding", "completeBinding", "getCapabilities", "getPermissionState", "execute"]);
+assert.equal(localRequests[4].command.commandId, command.commandId);
 
 const remoteCommand = { id: command.commandId, deviceId: "remote-1", action: "show_notification", payload: command.payload, requireConfirm: false, ttlSeconds: 60, createdAt: command.createdAt };
 const remoteCalls = [];

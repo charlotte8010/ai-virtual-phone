@@ -1,9 +1,8 @@
 import {
   createRealityNativeRequest,
-  normalizeRealityBindingMaterial,
   normalizeRealityNativeResponse,
   type RealityCommand,
-  type RealityBindingMaterial,
+  type RealityDeviceCredentials,
   type RealityNativeOperation,
 } from "../android-reality-bridge-protocol";
 
@@ -18,7 +17,12 @@ export type RealityChannelEndpoint = {
 };
 
 export type NativeRealityChannel = {
-  request(operation: RealityNativeOperation, command?: RealityCommand, bindingNonce?: string): Promise<unknown>;
+  request(
+    operation: RealityNativeOperation,
+    command?: RealityCommand,
+    bindingNonce?: string,
+    credentials?: RealityDeviceCredentials,
+  ): Promise<unknown>;
 };
 
 type RealityWindow = Window & {
@@ -90,9 +94,14 @@ export class BrowserNativeRealityChannel implements NativeRealityChannel {
     endpoint.addEventListener("message", this.onMessage);
   }
 
-  request(operation: RealityNativeOperation, command?: RealityCommand, bindingNonce?: string): Promise<unknown> {
+  request(
+    operation: RealityNativeOperation,
+    command?: RealityCommand,
+    bindingNonce?: string,
+    credentials?: RealityDeviceCredentials,
+  ): Promise<unknown> {
     const requestId = createRequestId();
-    const request = createRealityNativeRequest({ requestId, operation, command, bindingNonce });
+    const request = createRealityNativeRequest({ requestId, operation, command, bindingNonce, credentials });
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);

@@ -19,6 +19,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import app.floatphone.shell.reality.runtime.RealityBridgeRuntimeProvider
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
@@ -44,6 +45,7 @@ class PushService : Service() {
         private const val PREF_KEY = "api_key"
         private const val PREF_USER = "user_id"
         private const val ACTION_RECONFIGURE = "app.floatphone.shell.RECONFIGURE_PUSH"
+        private const val ACTION_RECONFIGURE_REALITY = "app.floatphone.shell.RECONFIGURE_REALITY"
         private var running = false
 
         fun start(context: Context) {
@@ -71,6 +73,13 @@ class PushService : Service() {
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
             else context.startService(intent)
         }
+
+        /** Reconnects the Reality runtime inside this same foreground service. */
+        fun requestRealityReconnect(context: Context) {
+            val intent = Intent(context, PushService::class.java).setAction(ACTION_RECONFIGURE_REALITY)
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+            else context.startService(intent)
+        }
     }
 
     private val client = OkHttpClient.Builder()
@@ -83,6 +92,7 @@ class PushService : Service() {
     private var msgSeq = 2
     private var shellSubRegistered = false
     private val reconnectSignal = Object()
+    private lateinit var realityRuntime: app.floatphone.shell.reality.runtime.RealityBridgeRuntime
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -91,6 +101,8 @@ class PushService : Service() {
         running = true
         createChannels()
         startForeground(NOTIF_FG_ID, buildKeepAliveNotification("等待连接…"))
+        realityRuntime = RealityBridgeRuntimeProvider.get(this)
+        realityRuntime.start()
         thread(name = "shell-push-loop") { connectionLoop() }
     }
 
@@ -101,6 +113,9 @@ class PushService : Service() {
             updateKeepAlive("正在连接个人云…")
             synchronized(reconnectSignal) { reconnectSignal.notifyAll() }
         }
+        if (intent?.action == ACTION_RECONFIGURE_REALITY) {
+            if (::realityRuntime.isInitialized) realityRuntime.restartCloud()
+        }
         return START_STICKY
     }
 
@@ -108,6 +123,7 @@ class PushService : Service() {
         stopped = true
         running = false
         socket?.cancel()
+        if (::realityRuntime.isInitialized) realityRuntime.stop()
         super.onDestroy()
     }
 
