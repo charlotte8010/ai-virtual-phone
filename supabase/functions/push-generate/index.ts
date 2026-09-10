@@ -229,7 +229,7 @@ async function sendWebPushRaw(
   vapid: { publicKey: string; privateKey: string; subject: string },
   ttl: number,
 ): Promise<number> {
-  const body = await encryptWebPushPayload(p256dhB64, authB64, payload);
+  const body = await encryptWebPushPayload(sub.p256dh, sub.auth, payload);
   const authorization = await buildVapidAuth(sub.endpoint, vapid.subject, vapid.publicKey, vapid.privateKey);
   const response = await fetch(sub.endpoint, {
     method: "POST",
