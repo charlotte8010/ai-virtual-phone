@@ -3115,7 +3115,6 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
     const handleApproveMemoryWrite = async (msg: ChatMessage) => {
         if (msg.mediaType !== "memory_write_request") return;
-        persistHiddenToolResult("确认写入记忆");
         const request: MemoryWriteRequest = {
             capabilityId: "memory_write",
             sessionId: session.id,
@@ -3141,7 +3140,6 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
 
     const handleIgnoreMemoryWrite = (msg: ChatMessage) => {
         if (msg.mediaType !== "memory_write_request") return;
-        persistHiddenToolResult("忽略写入记忆");
         updateTransientMessage(msg.id, current => ({
             ...current,
             mediaData: {
