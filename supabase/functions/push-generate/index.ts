@@ -8,6 +8,128 @@
 
 type ProviderKind = "openai-compatible" | "anthropic" | "gemini";
 
+type RuntimeTimeContextMeta = {
+  systemTimeZone?: string;
+  characterTimeZone?: string;
+};
+
+type RuntimeDateParts = {
+  year: string;
+  month: string;
+  day: string;
+  hour: string;
+  minute: string;
+  second: string;
+};
+
+const RUNTIME_WEEKDAYS = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+const RUNTIME_TIME_CONTEXT_RE = /当前系统时间：\d{4}年\d{1,2}月\d{1,2}日\d{2}:\d{2}(?: [^，\n]+)?，星期[一二三四五六日](?:\n角色本地时间：\d{4}年\d{1,2}月\d{1,2}日\d{2}:\d{2} [^，\n]+，星期[一二三四五六日]\n判断角色作息、问候、深夜\/清晨\/工作时间时，优先使用角色本地时间。)?/g;
+
+function normalizeRuntimeTimeZone(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const timeZone = value.trim();
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(new Date(0));
+    return timeZone;
+  } catch {
+    return null;
+  }
+}
+
+function getRuntimeDateParts(date: Date, timeZone: string): RuntimeDateParts {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  const values: Partial<RuntimeDateParts> = {};
+  for (const part of formatter.formatToParts(date)) {
+    if (
+      part.type === "year"
+      || part.type === "month"
+      || part.type === "day"
+      || part.type === "hour"
+      || part.type === "minute"
+      || part.type === "second"
+    ) {
+      values[part.type] = part.value;
+    }
+  }
+  return {
+    year: values.year || "0000",
+    month: values.month || "01",
+    day: values.day || "01",
+    hour: values.hour || "00",
+    minute: values.minute || "00",
+    second: values.second || "00",
+  };
+}
+
+function formatRuntimeChineseDateTime(date: Date, timeZone: string): string {
+  const parts = getRuntimeDateParts(date, timeZone);
+  return `${Number(parts.year)}年${Number(parts.month)}月${Number(parts.day)}日${parts.hour}:${parts.minute}`;
+}
+
+function getRuntimeWeekday(date: Date, timeZone: string): string {
+  try {
+    const label = new Intl.DateTimeFormat("zh-CN", { timeZone, weekday: "long" }).format(date);
+    return label || RUNTIME_WEEKDAYS[0];
+  } catch {
+    return RUNTIME_WEEKDAYS[date.getUTCDay()];
+  }
+}
+
+function runtimeTimeZonesDiffer(date: Date, systemTimeZone: string, characterTimeZone: string): boolean {
+  const systemParts = getRuntimeDateParts(date, systemTimeZone);
+  const characterParts = getRuntimeDateParts(date, characterTimeZone);
+  return systemParts.year !== characterParts.year
+    || systemParts.month !== characterParts.month
+    || systemParts.day !== characterParts.day
+    || systemParts.hour !== characterParts.hour
+    || systemParts.minute !== characterParts.minute;
+}
+
+function buildRuntimeTimeContext(meta: RuntimeTimeContextMeta, now = new Date()): string | null {
+  const systemTimeZone = normalizeRuntimeTimeZone(meta.systemTimeZone);
+  if (!systemTimeZone) return null;
+  const systemTime = formatRuntimeChineseDateTime(now, systemTimeZone);
+  const systemWeekday = getRuntimeWeekday(now, systemTimeZone);
+  const characterTimeZone = normalizeRuntimeTimeZone(meta.characterTimeZone);
+  if (!characterTimeZone || !runtimeTimeZonesDiffer(now, systemTimeZone, characterTimeZone)) {
+    return `当前系统时间：${systemTime}，${systemWeekday}`;
+  }
+  return [
+    `当前系统时间：${systemTime} ${systemTimeZone}，${systemWeekday}`,
+    `角色本地时间：${formatRuntimeChineseDateTime(now, characterTimeZone)} ${characterTimeZone}，${getRuntimeWeekday(now, characterTimeZone)}`,
+    "判断角色作息、问候、深夜/清晨/工作时间时，优先使用角色本地时间。",
+  ].join("\n");
+}
+
+function refreshRuntimeTimeContext(
+  body: Record<string, unknown>,
+  metaValue: unknown,
+): Record<string, unknown> {
+  const cloned = JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+  if (!metaValue || typeof metaValue !== "object" || Array.isArray(metaValue)) return cloned;
+  const replacement = buildRuntimeTimeContext(metaValue as RuntimeTimeContextMeta);
+  if (!replacement) return cloned;
+  const visit = (value: unknown): unknown => {
+    if (typeof value === "string") return value.replace(RUNTIME_TIME_CONTEXT_RE, replacement);
+    if (Array.isArray(value)) return value.map(visit);
+    if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      for (const [key, item] of Object.entries(record)) record[key] = visit(item);
+    }
+    return value;
+  };
+  return visit(cloned) as Record<string, unknown>;
+}
+
 // ── 内嵌：Web Push 协议原生实现（RFC8291 aes128gcm + RFC8292 VAPID）──
 // npm:web-push 依赖 Node 加密接口，在 Deno Edge 运行时不可靠，这里用 WebCrypto 手写。
 
@@ -107,7 +229,7 @@ async function sendWebPushRaw(
   vapid: { publicKey: string; privateKey: string; subject: string },
   ttl: number,
 ): Promise<number> {
-  const body = await encryptWebPushPayload(sub.p256dh, sub.auth, payload);
+  const body = await encryptWebPushPayload(p256dhB64, authB64, payload);
   const authorization = await buildVapidAuth(sub.endpoint, vapid.subject, vapid.publicKey, vapid.privateKey);
   const response = await fetch(sub.endpoint, {
     method: "POST",
@@ -595,6 +717,7 @@ Deno.serve(async (req: Request) => {
       return;
     }
 
+    const requestBody = refreshRuntimeTimeContext(payload.request.body, payload.merge?.runtimeTimeContext);
     await progress("llm request started");
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 300_000);
@@ -603,7 +726,7 @@ Deno.serve(async (req: Request) => {
       llmResponse = await fetch(payload.request.url, {
         method: "POST",
         headers: payload.request.headers,
-        body: JSON.stringify(payload.request.body),
+        body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
     } finally {
