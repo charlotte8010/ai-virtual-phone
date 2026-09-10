@@ -28,6 +28,7 @@ import {
     type IdleReconnectRule,
 } from "./idle-reconnect-storage";
 import { loadCharacters } from "./character-storage";
+import { getSystemTimeZone } from "./character-time";
 import type { RegexConfig } from "./settings-types";
 import type { LLMMessage } from "./llm-prompt-assembler";
 
@@ -45,6 +46,25 @@ const CALL_INVITE_INSTRUCTION = "（可选能力：如果你此刻更想直接�
     + "或者事情几句话说不清——就在回复的第一行使用你已有的小手机通话格式：[我向当前聊天对象发起了语音通话]，"
     + "其中聊天对象按当前用户填写；从第二行开始写你接通后要说的话。"
     + "不适合打电话就正常发消息。无论选哪种，都不要提及本条说明。）";
+
+type RuntimeTimeContextMeta = {
+    systemTimeZone: string;
+    characterTimeZone?: string;
+};
+
+function buildRuntimeTimeContextMeta(characterTimeZone?: string | null): RuntimeTimeContextMeta {
+    const normalizedCharacterTimeZone = characterTimeZone?.trim();
+    return {
+        systemTimeZone: getSystemTimeZone(),
+        ...(normalizedCharacterTimeZone ? { characterTimeZone: normalizedCharacterTimeZone } : {}),
+    };
+}
+
+function getSessionCharacterTimeZone(sessionId: string): string | undefined {
+    const session = loadChatSessions().find(item => item.id === sessionId);
+    if (!session || session.isGroup) return undefined;
+    return loadCharacters().find(character => character.id === session.contactId)?.timeZone?.trim() || undefined;
+}
 
 function readCallInviteArmedMap(): Record<string, number> {
     try {
@@ -161,6 +181,7 @@ export async function armReplyBailout(params: {
                     appId: "chat",
                     appTags: ["chat", "text"],
                     armAt,
+                    runtimeTimeContext: buildRuntimeTimeContextMeta(getSessionCharacterTimeZone(params.sessionId)),
                     ...(params.replyAfter?.localMessageId
                         ? {
                             replyAfterLocalMessageId: params.replyAfter.localMessageId,
@@ -314,6 +335,7 @@ export async function armFollowUpBailout(
                         appId: "chat",
                         appTags: ["chat", "text", "followup"],
                         followUpCount: count,
+                        runtimeTimeContext: buildRuntimeTimeContextMeta(character.timeZone),
                     },
                 },
             }),
@@ -334,6 +356,8 @@ async function postBailoutJob(input: {
     weixinBotId?: string;
     shortcutContinuation?: OfflineShortcutContinuation | null;
 }): Promise<boolean> {
+    const sessionId = typeof input.merge.sessionId === "string" ? input.merge.sessionId : "";
+    const runtimeTimeContext = buildRuntimeTimeContextMeta(getSessionCharacterTimeZone(sessionId));
     const response = await pushJobsFetch({
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -351,7 +375,7 @@ async function postBailoutJob(input: {
                 notify: { title: input.notifyTitle, url: "/" },
                 ...(input.weixinBotId ? { weixin: { botId: input.weixinBotId } } : {}),
                 ...(input.shortcutContinuation ? { shortcutContinuation: input.shortcutContinuation } : {}),
-                merge: input.merge,
+                merge: { ...input.merge, runtimeTimeContext },
             },
         }),
     }).catch(() => null);
