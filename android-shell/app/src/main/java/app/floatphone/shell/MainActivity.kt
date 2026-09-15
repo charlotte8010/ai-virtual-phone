@@ -50,6 +50,18 @@ class MainActivity : AppCompatActivity() {
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var systemStatusBarShown = true
 
+    // WebView 的 blob:/data: URL 只存在于渲染进程，DownloadManager 无法直接读取。
+    // 由页面按小块交给 AndroidShell，先写入 cache 临时文件，再通过系统文件选择器保存。
+    private val exportLock = Any()
+    private var activeExportToken: String? = null
+    private var activeExportStream: java.io.FileOutputStream? = null
+    private var activeExportTempFile: java.io.File? = null
+    private var activeExportName = "float-export"
+    private var activeExportMime = "application/octet-stream"
+    private var pendingExportTempFile: java.io.File? = null
+    private var pendingExportName = "float-export"
+    private var pendingExportMime = "application/octet-stream"
+
     private val fileChooserLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -57,6 +69,36 @@ class MainActivity : AppCompatActivity() {
         filePathCallback = null
         val data = result.data?.data
         callback.onReceiveValue(if (data != null) arrayOf(data) else emptyArray())
+    }
+
+    private val saveExportLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val tempFile = synchronized(exportLock) {
+            pendingExportTempFile.also { pendingExportTempFile = null }
+        } ?: return@registerForActivityResult
+
+        val target = result.data?.data
+        if (result.resultCode != android.app.Activity.RESULT_OK || target == null) {
+            tempFile.delete()
+            return@registerForActivityResult
+        }
+
+        Thread {
+            val saved = runCatching {
+                contentResolver.openOutputStream(target)?.use { output ->
+                    tempFile.inputStream().use { input -> input.copyTo(output) }
+                } ?: error("无法打开目标文件")
+            }.isSuccess
+            tempFile.delete()
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    if (saved) "文件已保存" else "保存失败，请重试",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }.start()
     }
 
     private val notifPermissionLauncher = registerForActivityResult(
@@ -137,6 +179,84 @@ class MainActivity : AppCompatActivity() {
     private fun syncSystemBarPreferenceFromCookie(url: String = SITE_URL) {
         systemStatusBarShown = readSystemStatusBarPreference(url)
         applySystemBars()
+    }
+
+    private fun cleanupActiveExportLocked() {
+        runCatching { activeExportStream?.close() }
+        activeExportStream = null
+        activeExportTempFile?.delete()
+        activeExportTempFile = null
+        activeExportToken = null
+    }
+
+    /** 把 WebView 内存中的 blob/data 下载转成分块原生导出，避免大备份一次性跨 JS bridge。 */
+    private fun exportWebViewBlob(
+        url: String,
+        contentDisposition: String?,
+        mimeType: String?,
+    ) {
+        val token = java.util.UUID.randomUUID().toString()
+        synchronized(exportLock) {
+            cleanupActiveExportLocked()
+            activeExportToken = token
+        }
+
+        val fallbackName = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
+        val sourceUrlJson = org.json.JSONObject.quote(url)
+        val tokenJson = org.json.JSONObject.quote(token)
+        val fallbackNameJson = org.json.JSONObject.quote(fallbackName)
+        val fallbackMimeJson = org.json.JSONObject.quote(mimeType.orEmpty())
+        val script = """
+            (async function () {
+              var sourceUrl = $sourceUrlJson;
+              var token = $tokenJson;
+              try {
+                if (!window.AndroidShell || !window.AndroidShell.beginBlobExport) {
+                  throw new Error('Android export bridge unavailable');
+                }
+                var response = await fetch(sourceUrl);
+                var blob = await response.blob();
+                var anchor = Array.prototype.slice.call(document.querySelectorAll('a[download]'))
+                  .find(function (item) { return item.href === sourceUrl; });
+                var fileName = anchor && anchor.download ? anchor.download : $fallbackNameJson;
+                var mime = blob.type || $fallbackMimeJson || 'application/octet-stream';
+                if (!window.AndroidShell.beginBlobExport(token, String(fileName || 'float-export'), String(mime))) {
+                  throw new Error('Unable to start Android export');
+                }
+
+                function bytesToBase64(bytes) {
+                  var binary = '';
+                  var step = 0x8000;
+                  for (var i = 0; i < bytes.length; i += step) {
+                    binary += String.fromCharCode.apply(
+                      null,
+                      bytes.subarray(i, Math.min(i + step, bytes.length))
+                    );
+                  }
+                  return btoa(binary);
+                }
+
+                var chunkSize = 192 * 1024;
+                for (var offset = 0; offset < blob.size; offset += chunkSize) {
+                  var bytes = new Uint8Array(
+                    await blob.slice(offset, Math.min(offset + chunkSize, blob.size)).arrayBuffer()
+                  );
+                  if (!window.AndroidShell.appendBlobExportChunk(token, bytesToBase64(bytes))) {
+                    throw new Error('Unable to write Android export chunk');
+                  }
+                }
+                if (!window.AndroidShell.finishBlobExport(token)) {
+                  throw new Error('Unable to finish Android export');
+                }
+              } catch (error) {
+                try {
+                  window.AndroidShell.abortBlobExport(token, String(error && error.message || error));
+                } catch (_) {}
+              }
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(script, null)
+        Toast.makeText(this, "正在准备导出…", Toast.LENGTH_SHORT).show()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -221,12 +341,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 备份导出等下载：交给系统下载管理器，落到公共下载目录
+        // 普通 http(s) 下载继续交给 DownloadManager；blob/data 先从 WebView 内存取出，再走系统“另存为”。
         webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
             runCatching {
                 if (url.startsWith("blob:") || url.startsWith("data:")) {
-                    // blob/data 由页面内 JS 触发的 a[download] 处理；提示用户等待
-                    Toast.makeText(this, "正在导出…", Toast.LENGTH_SHORT).show()
+                    exportWebViewBlob(url, contentDisposition, mimeType)
                     return@DownloadListener
                 }
                 val request = DownloadManager.Request(Uri.parse(url)).apply {
@@ -240,6 +359,8 @@ class MainActivity : AppCompatActivity() {
                 }
                 (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
                 Toast.makeText(this, "已开始下载到「下载」目录", Toast.LENGTH_SHORT).show()
+            }.onFailure {
+                Toast.makeText(this, "下载失败，请重试", Toast.LENGTH_SHORT).show()
             }
         })
 
@@ -509,6 +630,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         CookieManager.getInstance().flush()
+        synchronized(exportLock) {
+            cleanupActiveExportLocked()
+            pendingExportTempFile?.delete()
+            pendingExportTempFile = null
+        }
         webView.destroy()
         super.onDestroy()
     }
@@ -524,6 +650,108 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 systemStatusBarShown = shown
                 applySystemBars()
+            }
+        }
+
+        /** WebView blob/data 导出开始：只接受由原生下载监听创建的一次性 token。 */
+        @JavascriptInterface
+        fun beginBlobExport(token: String, fileName: String, mimeType: String): Boolean =
+            synchronized(exportLock) {
+                if (activeExportToken != token || activeExportStream != null) {
+                    return@synchronized false
+                }
+                runCatching {
+                    val tempFile = java.io.File.createTempFile("float-export-", ".tmp", cacheDir)
+                    activeExportTempFile = tempFile
+                    activeExportStream = java.io.FileOutputStream(tempFile)
+                    activeExportName = fileName
+                        .substringAfterLast('/')
+                        .substringAfterLast('\\')
+                        .ifBlank { "float-export" }
+                    activeExportMime = mimeType.ifBlank { "application/octet-stream" }
+                    true
+                }.getOrElse {
+                    cleanupActiveExportLocked()
+                    false
+                }
+            }
+
+        /** 分块写入，避免大型备份一次性跨 WebView bridge 导致卡死或消息过大。 */
+        @JavascriptInterface
+        fun appendBlobExportChunk(token: String, base64Chunk: String): Boolean =
+            synchronized(exportLock) {
+                val stream = activeExportStream
+                if (activeExportToken != token || stream == null) {
+                    return@synchronized false
+                }
+                runCatching {
+                    stream.write(android.util.Base64.decode(base64Chunk, android.util.Base64.DEFAULT))
+                    true
+                }.getOrElse {
+                    cleanupActiveExportLocked()
+                    false
+                }
+            }
+
+        /** 所有块写完后弹系统 ACTION_CREATE_DOCUMENT，让用户选择真正的保存位置。 */
+        @JavascriptInterface
+        fun finishBlobExport(token: String): Boolean {
+            val ready = synchronized(exportLock) {
+                if (activeExportToken != token || activeExportStream == null || activeExportTempFile == null) {
+                    return@synchronized null
+                }
+                val closed = runCatching { activeExportStream?.close() }.isSuccess
+                activeExportStream = null
+                if (!closed) {
+                    cleanupActiveExportLocked()
+                    return@synchronized null
+                }
+                val tempFile = activeExportTempFile ?: return@synchronized null
+                activeExportTempFile = null
+                activeExportToken = null
+                pendingExportTempFile?.delete()
+                pendingExportTempFile = tempFile
+                pendingExportName = activeExportName
+                pendingExportMime = activeExportMime
+                pendingExportName to pendingExportMime
+            } ?: return false
+
+            runOnUiThread {
+                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = ready.second
+                    putExtra(Intent.EXTRA_TITLE, ready.first)
+                }
+                runCatching {
+                    saveExportLauncher.launch(intent)
+                }.onFailure {
+                    synchronized(exportLock) {
+                        pendingExportTempFile?.delete()
+                        pendingExportTempFile = null
+                    }
+                    Toast.makeText(this@MainActivity, "无法打开保存位置", Toast.LENGTH_SHORT).show()
+                }
+            }
+            return true
+        }
+
+        /** 页面读取 blob 失败时清理临时状态，不留下半截备份。 */
+        @JavascriptInterface
+        fun abortBlobExport(token: String, message: String) {
+            val shouldNotify = synchronized(exportLock) {
+                if (activeExportToken != token) return@synchronized false
+                cleanupActiveExportLocked()
+                true
+            }
+            if (shouldNotify) {
+                runOnUiThread {
+                    val detail = message.take(80)
+                    Toast.makeText(
+                        this@MainActivity,
+                        if (detail.isBlank()) "导出失败，请重试" else "导出失败：$detail",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
             }
         }
 
